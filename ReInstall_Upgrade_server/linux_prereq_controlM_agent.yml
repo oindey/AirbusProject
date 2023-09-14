@@ -1,0 +1,170 @@
+---
+- name: Playbook check if host exists in inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: This target host {{ HOSTS }} does not exist in the Ansible Tower Inventory 2L22"
+        failed_when: True
+
+- name: Playbook check if host is Linux
+  gather_facts: false
+  hosts: "{{ HOSTS }}"
+  vars:
+    HOSTS:
+
+  tasks:
+    - block:
+      - name: "Fail if Variable ansible_connection is winrm"
+        assert:
+          that:
+            - ansible_connection != "winrm"
+          msg: "Playbook is for linux not windows"
+
+      rescue:
+      - name: Invalid OS for this playbook
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: {{ HOSTS }} is a windows cannot run this playbook"
+        failed_when: True
+
+- name: Playbook Linux prerequistes for ControlM agent
+  hosts: "{{ HOSTS }}"
+  gather_facts: true
+  become: true
+  vars:
+    HOSTS: ""
+    mount_point: "/mnt_{{ansible_uptime_seconds}}"
+    FILERMOUNTER: "{{ HOSTS }}"
+    FILER: '//fr0-svm09.eu.airbus.corp/YA00_ctmsoftdistrib/Control-M_Agent 9.0.00'
+    CTRLMBIN:
+      - 'DRKAI.9.0.00_Linux-x86_64.zip'
+      - 'PAKAI.9.0.00.400_Linux-x86_64_INSTALL.BIN'
+    CTRLMSCRIPT: 'CTM_env_init_automation.sh'
+    LOCALDIR: '/tmp/Controlm'
+
+  tasks:
+    - block:
+      - name: "check if controlM agent is already installed"
+        shell: rpm -qa |grep -i controlm
+        args:
+          warn: no
+        register: ctrlm_version
+        failed_when: false
+        changed_when: false
+
+      - name: "find ansible node if RH<7"
+        shell: hostname -f
+        register: node
+        when: ansible_distribution_version < '7'
+        changed_when: false
+        become: no
+        delegate_to: localhost
+
+      - name: "Set FILERMOUNTER"
+        set_fact:
+          FILERMOUNTER: "{{ node.stdout | trim }}"
+        when: ansible_distribution_version < '7'
+
+      - name: "Install cifs-utils on {{FILERMOUNTER}}"
+        yum:
+          name: cifs-utils
+          state: installed
+        when: ctrlm_version.rc != 0
+        delegate_to: "{{ FILERMOUNTER }}"
+
+      - name: "mount {{FILER}} on {{FILERMOUNTER}}:{{mount_point}}"
+        mount:
+          path: "{{mount_point}}"
+          fstype: cifs
+          src: "{{FILER}}"
+          opts: "vers=3,username={{ ansible_user }},domain=eu,password={{ansible_password}},iocharset=utf8"
+          state: mounted
+        when: ctrlm_version.rc != 0
+        delegate_to: "{{ FILERMOUNTER }}"
+
+      - name: "create directory {{ LOCALDIR }}"
+        file:
+          path: "{{ LOCALDIR }}"
+          state: directory
+          mode: '0755'
+
+      - name: "Copy install binaries from Filer"
+        copy:
+          src: '{{mount_point}}/{{ CTRLMBIN }}'
+          remote_src: yes
+          dest: "{{ LOCALDIR }}/"
+          mode: 744
+        when: ctrlm_version.rc != 0 and FILERMOUNTER == HOSTS
+ 
+      - name: "Copy install script from Filer"
+        copy:
+          src: '{{mount_point}}/{{ CTRLMSCRIPT }}'
+          remote_src: yes
+          dest: "{{ LOCALDIR }}/"
+          mode: 744
+        when: ctrlm_version.rc != 0 and FILERMOUNTER == HOSTS
+ 
+      - name: "Copy install binaries from Filer through Ansible node"
+        copy:
+          src: '{{mount_point}}/{{ CTRLMBIN }}'
+          dest: "{{ LOCALDIR }}/"
+          mode: 744
+        when: ctrlm_version.rc != 0 and FILERMOUNTER != HOSTS
+ 
+      - name: "Copy install script from Filer through Ansible node"
+        copy:
+          src: '{{mount_point}}/{{ CTRLMSCRIPT }}'
+          dest: "{{ LOCALDIR }}/"
+          mode: 744
+        when: ctrlm_version.rc != 0 and FILERMOUNTER != HOSTS
+
+#      - name: "Execute script {{ LOCALDIR }}/{{CTRLMSCRIPT|basename}}"
+#        command: "{{ LOCALDIR }}/{{ CTRLMSCRIPT|basename }}"
+#        register: script
+#        when: ctrlm_version.rc != 0
+  
+      - name: "Umount Filer {{FILER}}"
+        mount:
+          path: "{{mount_point}}"
+          fstype: cifs
+          src: "{{FILER}}"
+          state: absent
+        when: ctrlm_version.rc != 0
+        delegate_to: "{{ FILERMOUNTER }}"
+
+      - name: Log output for SYNTBOT when controlM is already installed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: SUCCESSFUL: ControlM agent {{ ctrlm_version.stdout | default('empty') }} is already installed on {{ HOSTS }}"
+        when: ctrlm_version.rc == 0
+
+      - name: Log output for SYNTBOT when controlM is not installed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: SUCCESSFUL: ControlM binaries {{ CTRLMBIN | join (', ') }} and controlM script {{CTRLMSCRIPT}} have been copied to {{ HOSTS }} in {{ LOCALDIR }}"
+#            - "SYNTBOT_OUTPUT: SUCCESSFUL: ControlM binaries {{ CTRLMBIN | join (', ') }} have been copied to {{ HOSTS }} in {{ LOCALDIR }} and controlM script {{CTRLMSCRIPT}} has been executed with following stdout: {{script.stdout | default('empty') }}"
+        when: ctrlm_version.rc != 0
+
+      rescue:
+      - name: "Umount Filer {{FILER}}"
+        mount:
+          path: "{{mount_point}}"
+          fstype: cifs
+          src: "{{FILER}}"
+          state: absent
+        delegate_to: "{{ FILERMOUNTER }}"
+
+      - name: "FAILED log for Syntbot"
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: Task {{ ansible_failed_task.name | default ('Copy binaries') }} failed"
+        failed_when: True
