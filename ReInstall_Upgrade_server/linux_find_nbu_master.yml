@@ -1,0 +1,107 @@
+---
+- name: Playbook check if host exists in inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: This target host {{ HOSTS }} does not exist in the Ansible Tower Inventory 2L22"
+        failed_when: True
+
+- name: Playbook find Netbackup master for a host
+  hosts: localhost
+  gather_facts: false
+  become: false
+  vars:
+    HOSTS: ""
+    COUNTRY: ""
+#    CITY: ""
+#    ENV: ""
+    VIRT: ""
+    RESTRICTED: ""
+    MASTER: ""
+  tasks:
+    - block:
+      - name: "Master is fr0-nbumtr-p03"
+        set_fact:
+          MASTER: "fr0-nbumtr-p03.eu.airbus.corp"
+        changed_when: false
+        when:
+          #- RESTRICTED is not search('NOT-Restricted')
+          - RESTRICTED is not search('STANDARD')
+          - COUNTRY == "France" or ( COUNTRY == "" and HOSTS is search('^fr'))
+
+      - name: "Master is fr0-iaasnbu-p01"
+        set_fact:
+          MASTER: "fr0-iaasnbu-p01.eu.airbus.corp"
+        changed_when: false
+        when:
+          #- RESTRICTED is search('NOT-Restricted')
+          - RESTRICTED is search('STANDARD')
+          - COUNTRY == "France" or ( COUNTRY == "" and HOSTS is search('^fr'))
+          - VIRT|bool 
+
+      - name: "Master is nbumtr1"
+        set_fact:
+          MASTER: "nbumtr1.eu.airbus.corp"
+        changed_when: false
+        when:
+          #- RESTRICTED is search('NOT-Restricted')
+          - RESTRICTED is search('STANDARD')
+          - COUNTRY == "France" or ( COUNTRY == "" and HOSTS is search('^fr'))
+          - VIRT|bool == false
+
+      - name: "Master is de0-ecnbu-p03"
+        set_fact:
+          MASTER: "de0-ecnbu-p03.eu.airbus.corp"
+        changed_when: false
+        when:
+          #- RESTRICTED is not search('NOT-Restricted')
+          - RESTRICTED is not search('STANDARD')
+          - COUNTRY == "Germany" or ( COUNTRY == "" and HOSTS is search('^de'))
+
+      - name: "Master is de0-iaasnbu-p01"
+        set_fact:
+          MASTER: "de0-iaasnbu-p01.eu.airbus.corp"
+        changed_when: false
+        when:
+          #- RESTRICTED is search('NOT-Restricted')
+          - RESTRICTED is search('STANDARD')
+          - COUNTRY == "Germany" or ( COUNTRY == "" and HOSTS is search('^de'))
+          - VIRT|bool
+
+      - name: "Master is de0-nbumtr-p01"
+        set_fact:
+          MASTER: "de0-nbumtr-p01.eu.airbus.corp"
+        changed_when: false
+        when:
+          #- RESTRICTED is search('NOT-Restricted')
+          - RESTRICTED is search('STANDARD')
+          - COUNTRY == "Germany" or ( COUNTRY == "" and HOSTS is search('^de'))
+          - VIRT|bool == false
+
+      - name: "check if master had been found"
+        assert:
+          that: MASTER != ""
+          msg: "Master not found for {{HOSTS}}  in the decision tree. The installation of the NBU client must be done manually"
+
+      - name: Log output for SYNTBOT
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: SUCCESSFUL: found NBU master for {{HOSTS}}"
+            - "SYNTBOT_PARAM: {{MASTER}}"
+
+      rescue:
+      - name: "FAILED log for Syntbot"
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: Task {{ ansible_failed_task.name}} failed: {{ ansible_failed_result.msg | default('') }}"
+        failed_when: True
