@@ -1,0 +1,81 @@
+---
+- name: Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED:  Task to Check if hosts exists in tower  failed on {{ HOSTS }}: Failed to find hosts in Ansible tower inventory "
+        failed_when: True
+
+- name: Playbook Oracle database Instance Version
+  hosts: "{{ HOSTS }}"
+  gather_facts: false
+  become: true
+  vars:
+    - HOSTS:
+    - ORA_SID:
+    - TABLESPACE:
+  tasks:
+    - block:
+      - name: test {{ ORA_SID }} in /etc/oratab
+        shell: grep "{{ ORA_SID }}:" /etc/oratab
+        register: result
+        changed_when: false
+
+      - name: Copy Execute script and SQL files
+        copy:
+          src: "{{ item.src }}"
+          dest: "{{ item.dest }}"
+          mode: "{{item.mode}}"
+        with_items:
+          - { src: '../files/ResizeTable.sh',dest: '/tmp/ResizeTable.sh', mode: '0777'}
+          - { src: '../files/ResizeTable.sql',dest: '/tmp/ResizeTable.sql', mode: '0777'}
+          - { src: '../files/StateBase.sql',dest: '/tmp/StateBase.sql', mode: '0777'}
+        changed_when: false
+
+      - name: run SQL Resize TableSpace
+        shell: /tmp/ResizeTable.sh "{{ ORA_SID }}" "{{ TABLESPACE }}" 
+        register: result
+        changed_when: false
+
+      - name: Delete files
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - /tmp/ResizeTable.sh
+          - /tmp/ResizeTable.sql
+          - /tmp/StateBase.sql
+        changed_when: false
+
+      - name: Log output for SYNTBOT
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: SUCCESSFUL: on host {{ HOSTS }}"
+            - "SYNTBOT_DISPLAY: {{ result.stdout }}"
+
+      rescue:
+      - name: Delete files
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - /tmp/ResizeTable.sh
+          - /tmp/ResizeTable.sql
+          - /tmp/StateBase.sql
+        changed_when: false
+
+      - name: Log output for SYNTBOT
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task '{{ ansible_failed_task.name}}' failed on {{ HOSTS }}: {{ result.stdout }}"
+            - "SYNTBOT_DISPLAY: {{ result.stdout }}"
+        failed_when: True
