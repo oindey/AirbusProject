@@ -1,0 +1,50 @@
+---
+- name: Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT : FAILED :  This target host {{ HOSTS }} does not exist in the Tower Ansible Inventory 2L22"
+        failed_when: True
+
+# restart the Control-M service on windows host 
+- name: windows service restart
+  hosts: "{{ HOSTS }}"
+  tasks:
+   - block:
+     - name: Log output for SYNTBOT service status before restart
+       win_shell:
+         Get-Service "{{ SERVICE }}"
+       changed_when: false
+
+     - name: service restart
+       win_service:
+         name: "{{ SERVICE }}"
+         state: restarted
+     
+     - name: Log output for SYNTBOT service status after restart
+       win_shell:
+         Get-Service "{{ SERVICE }}"
+       changed_when: false
+
+     - name: Log output for SYNTBOT when successful
+       debug:
+         msg:
+          - "SYNTBOT_OUTPUT : SUCCESSFUL on {{ HOSTS }}"
+
+     rescue:
+     - name: Log output for SYNTBOT when failed
+       debug:
+         msg:
+          - "SYNTBOT_OUTPUT : FAILED : Task {{ ansible_failed_task.name}} failed on {{ HOSTS }} : {{ ansible_failed_result.msg }}"
+       failed_when: True
