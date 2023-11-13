@@ -1,0 +1,59 @@
+---
+- name: Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED :  This target host {{ HOSTS }} does not exist in Tower Ansible Inventory 2L22"
+        failed_when: True
+
+- name: Playbook  Get Oracle Kernel version
+  gather_facts: false
+  hosts: "{{ HOSTS }}"
+  become: true
+  vars:
+   HOSTS:
+   KERNEL_VERSION:
+
+  tasks:
+    - block:
+
+      - name: Execute sqlplus on  "{{ HOSTS }}"
+        become_user: oracle
+        shell: .  ~oracle/.profile; sqlplus -V |grep -i release |awk '{ print substr($3,1,8)}'
+        register: result 
+
+
+      - set_fact:
+          KERNEL_VERSION: "{{ result.stdout|trim }}"
+      
+      - name: Display Oracle Version
+        debug:
+          msg:
+          - "Oracle Version : {{ KERNEL_VERSION }}"
+        failed_when: "'command not found' in result.stdout"
+
+      - name: Log output for SYNTBOT when successfull
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL - on {{ HOSTS }}"
+           - "SYNTBOT_PARAM1: {{ KERNEL_VERSION }}"
+
+      rescue:
+      - name: Log output for SYNTBOT when failed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED - Task {{ ansible_failed_task.name}} failed on {{ HOSTS }} : {{ ansible_failed_result.msg }}"
+        failed_when: True
+
+#-------------------------------------------------------------------------------
