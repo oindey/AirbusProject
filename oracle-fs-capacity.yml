@@ -1,0 +1,153 @@
+- name: Check if host exists in tower inventory
+  gather_facts: no
+  hosts: localhost
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS | join(', ') }} does not exist in Ansible Tower's inventory - [WARNING]Could not match supplied host pattern, ignoring"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: Task to Check if hosts exists in tower  failed on {{ HOSTS }}: Failed to find hosts in Ansible tower inventory"
+        failed_when: true
+
+- name: Delete failed oracle database dumps and fetch u07 file system usage
+  gather_facts: no
+  hosts: "{{ HOSTS }}"
+  become: true
+
+  vars:
+    # user input
+    HOSTS:
+    THRESHOLD:
+
+    # internal variables
+    base_path: /u07/flash_recovery_area/
+    db_names: []
+    all_db_dirs: []
+    filtered_dirs: []
+
+  tasks:
+    - block:
+      - name: Assert that THRESHOLD is provided
+        assert:
+          that:
+            - THRESHOLD | mandatory
+            - THRESHOLD is defined
+            - THRESHOLD | int != 0
+          msg: "Please provide a threshold for FS /u07"
+
+      - name: Get u07 filesystem usage
+        shell: df -hP /u07 |grep /u07 | awk '{print $5}' | cut -d% -f1
+        changed_when: false
+        register: result
+
+      - name: Check if /u07 is lower than {{ THRESHOLD }}% on {{ HOSTS }}
+        assert:
+          that: result.stdout|float  < {{ THRESHOLD }}|float
+          msg: 'FS /u07 has reached {{ THRESHOLD }}% threshold'
+        register: checkfs
+        ignore_errors: true
+
+      # result_all_directories
+      - name: Get list of all database directories in u07 base path
+        find:
+          paths: "{{ base_path }}"
+          file_type: directory
+          use_regex: yes
+          patterns: '^DB[^_]+'
+        register: result_all_directories
+        when: checkfs.failed == true
+
+      # all_db_dirs
+      - name: Store all database directory paths
+        set_fact:
+          all_db_dirs: "{{ result_all_directories.files | map(attribute='path') | list }}"
+        when: checkfs.failed == true
+
+      # result_all_dumps
+      - name: Get all dump files for all databases
+        shell: 'find {{ base_path }} -regex ".*\DataPump_DB\w+_FULL_[0-9_-]+.ALL.dmp"'
+        changed_when: false
+        register: result_all_dumps
+        when: checkfs.failed == true
+
+      # log_files
+      - name: Generate list of log file names corresponding to identified dumps
+        set_fact:
+          log_files: "{{ result_all_dumps.stdout_lines | regex_replace('.dmp', '.log') }}"
+        when: checkfs.failed == true
+
+      # result_errored_logs
+      - name: Search for the error in the list of log files
+        shell: "grep -lH 'ORA-' {{ log_files | join(' ') }} | cut -d: -f1 | tr '\n' ' '"
+        failed_when: false
+        changed_when: false
+        register: result_errored_logs
+        when: checkfs.failed == true and log_files|length > 0
+      
+      # failed_dumps
+      - name: Store dump files which has errors
+        set_fact:
+          failed_dumps: "{{ result_errored_logs.stdout | regex_replace('.log', '.dmp') }}"
+        when:
+        - checkfs.failed == true
+        - log_files|length > 0
+        - result_errored_logs is defined
+        - result_errored_logs.rc == 0
+
+      # result
+#      - name: Delete dump files
+#        shell: "rm {{ failed_dumps }}"
+#        register: result_del_dump
+#        when: 
+#        - checkfs.failed == true
+#        - failed_dumps is defined
+#        - failed_dumps | length > 0
+      - name: Delete dump files
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+        - "{{ failed_dumps.split() }}"
+        when: 
+        - checkfs.failed == true
+        - failed_dumps is defined
+        - failed_dumps | length > 0
+
+      - name: Get u07 filesystem usage
+        shell: df -hP /u07 |grep /u07 | awk '{print $5}' | cut -d% -f1
+        register: secondresult
+        changed_when: false
+        when: checkfs.failed == true
+      
+      - name: Check if /u07 is lower than {{ THRESHOLD }}% on {{ HOSTS }}
+        assert:
+          that: secondresult.stdout|float  < {{ THRESHOLD }}|float
+          msg: 'FS /u07 has reached {{ secondresult.stdout }}% it s greater than threshold {{ THRESHOLD }}%'
+        when: checkfs.failed == true
+
+      - name: Log output for SYNTBOT when successful before deleting dump(s)
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: all tasks are succeeded on {{ HOSTS }}: Percentage of used space for /u07 is {{ result.stdout | trim }}%: no need to search for failed dumps"
+        when: checkfs.failed == false
+      
+      - name: Log output for SYNTBOT when successful after deleting dump(s)
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: all tasks are succeeded on {{ HOSTS }}: Percentage of used space for /u07 is {{ secondresult.stdout | trim }}%. Dump(s) deleted due to error - {{ '[None]' if (failed_dumps == '') else failed_dumps }}"
+        when: 
+        - checkfs.failed == true
+      become_user: oracle
+
+      rescue:
+      - name: Log output for SYNTBOT FAILED
+        debug:
+          msg: 
+           - "SYNTBOT_OUTPUT: FAILED: Task {{ ansible_failed_task.name}} failed on {{ HOSTS }}: {{ ansible_failed_result.msg if (ansible_failed_result.results is not defined) else ansible_failed_result.results.0.msg }}"
+        failed_when: true       
