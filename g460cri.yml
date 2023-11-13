@@ -1,0 +1,58 @@
+---
+- name: Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+  vars:
+    HOSTS:
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED :  This target host {{HOSTS}} does not  exist in tower Ansible Inventory 2L22"
+          msg: "SYNTBOT_DISPLAY: FAILED :  This target host {{HOSTS}} does not  exist in tower Ansible Inventory 2L22"
+        failed_when: True
+
+# 
+- name: "UC G460 CRI Memoguard log analysis "
+  gather_facts: false
+  hosts: "{{ HOSTS }}"
+  vars:
+    INCLOGPATH: 
+    INCMESSAGE: 
+  tasks:
+    - block:
+      - name: Copy ./files/g460cri.ps1 to "{{ HOSTS }}"
+        win_copy:
+          src: ./files/g460cri.ps1
+          dest: C:/Temp/g460cri.ps1
+        register: result_copy
+
+      - name: Execute Powershell C:/Temp/g460cri.ps1 "{{ INCLOGPATH }}" '{{ INCMESSAGE }}'
+        win_command: powershell.exe -ExecutionPolicy ByPass -File C:/Temp/g460cri.ps1 "{{ INCLOGPATH }}" "{{ INCMESSAGE }}"
+        register: result
+        
+      - name: Display to SyntBot Application is UP
+        debug:
+          msg: "SYNTBOT_OUTPUT: SUCCESSFUL : Messages are being sent again, No impact to the application."
+
+      rescue:
+      - name: "Display to SyntBot Application "
+        debug:
+          msg:
+          - "SYNTBOT_OUTPUT: FAILED - Task {{ ansible_failed_task.name}} failed on {{ HOSTS }} : {{ ansible_failed_result.msg }}"
+          - "SYNTBOT_DISPLAY: {{ result.stdout | replace('\r','')|replace('\n','') | trim }}"
+        failed_when: True
+
+      always:
+       - name: Script file cleanup
+         win_file:
+           path: C:\Temp\g460cri.ps1
+           state: absent
