@@ -1,0 +1,49 @@
+---
+- name: Playbook Get Observer Server Name (SQLserver fr0-vsiaas-4725)
+  gather_facts: false
+  hosts: " fr0-vsiaas-4725.eu.airbus.corp"
+  vars:
+    HOSTS:  fr0-vsiaas-4725.eu.airbus.corp
+    ORA_SID:
+
+  tasks:
+    - block:
+      - name: Copy ./files/get-observer-server-name.ps1 to "{{ HOSTS }}"
+        win_copy:
+          src: ./files/get-observer-server-name.ps1
+          dest: C:/Temp/get-observer-server-name.ps1
+        register: result_copy
+
+      - name: Execute Powershell C:/Temp/get-observer-server-name.ps1 "{{ ORA_SID }}"
+        win_command: powershell.exe -ExecutionPolicy ByPass -File C:/Temp/get-observer-server-name.ps1 "{{ ORA_SID }}"
+        register: result
+
+      - set_fact:
+          OBSERVER_SERVER: "{{ result.stdout|trim }}"
+          cacheable: yes
+
+      - name: Display OBSERVER_SERVER "{{ OBSERVER_SERVER }}"
+        debug:
+          msg: 
+           - " Observer server : {{ OBSERVER_SERVER }}"
+        failed_when: "'DATABASE_NAME_NOT_FOUND' in result.stdout"
+
+      - name: Log output for SYNTBOT when successfull
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL - on {{ HOSTS }}"
+           - "SYNTBOT_PARAM1: {{ OBSERVER_SERVER|lower }}"
+
+      rescue:
+      - name: Log output for SYNTBOT FAILED
+        debug:
+          msg: 
+           - "SYNTBOT_OUTPUT:  FAILED : Task {{ ansible_failed_task.name}} failed on {{ HOSTS }} : {{ ansible_failed_result.msg }}"
+           - "SYNTBOT_DISPLAY: {{ OBSERVER_SERVER }}"
+        failed_when: true 
+
+      always:
+       - name: remove  file
+         win_file:
+           path: C:\Temp\get-observer-server-name.ps1
+           state: absent
