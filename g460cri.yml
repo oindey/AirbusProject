@@ -28,7 +28,7 @@
     INCLOGPATH: 
     INCMESSAGE: 
   tasks:
-    # - block:
+    - block:
     #   - name: Copy ./files/g460cri.ps1 to "{{ HOSTS }}"
     #     win_copy:
     #       #src: ./files/g460cri.ps1
