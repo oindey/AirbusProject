@@ -31,12 +31,15 @@
     - block:
       - name: Copy ./files/g460cri.ps1 to "{{ HOSTS }}"
         win_copy:
-          src: ./files/g460cri.ps1
-          dest: C:/Temp/g460cri.ps1
+          #src: ./files/g460cri.ps1
+          src: .g460cri.ps1
+          #dest: C:/Temp/g460cri.ps1
+          dest: .g460cri.ps1
         register: result_copy
 
       - name: Execute Powershell C:/Temp/g460cri.ps1 "{{ INCLOGPATH }}" '{{ INCMESSAGE }}'
-        win_command: powershell.exe -ExecutionPolicy ByPass -File C:/Temp/g460cri.ps1 "{{ INCLOGPATH }}" "{{ INCMESSAGE }}"
+        #win_command: powershell.exe -ExecutionPolicy ByPass -File C:/Temp/g460cri.ps1 "{{ INCLOGPATH }}" "{{ INCMESSAGE }}"
+        win_command: powershell.exe -ExecutionPolicy ByPass -File g460cri.ps1 "{{ INCLOGPATH }}" "{{ INCMESSAGE }}"
         register: result
         
       - name: Display to SyntBot Application is UP
