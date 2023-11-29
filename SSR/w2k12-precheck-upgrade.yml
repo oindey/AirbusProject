@@ -1,0 +1,134 @@
+---
+- name: Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']" 
+        with_items: "{{HOSTS|lower}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: 
+            - "SYNTBOT_OUTPUT: FAILED: This server {{HOSTS|lower}} does not exist in th inventory 2L22"
+        failed_when: True
+#------------------------------------------------------------------------------------------------
+#Check Port 5985
+- name: Playbook Windows Pre-Check for upgrade W2K12 to W2K16 
+  hosts: "{{ HOSTS|lower }}"
+  gather_facts: false
+  vars:
+    - HOSTS:
+    - ISO_FILE: 
+
+  tasks:
+    - block:
+      - name: Check if port 5985 is available
+        wait_for:
+          host: "{{ inventory_hostname }}"
+          port: 5985
+          connect_timeout: 2
+          timeout: 2
+        delegate_to: localhost
+
+      - name: Gathering facts
+        setup:
+
+      - set_fact:
+          OS: "{{ ansible_distribution }}"
+          TYPE: "{{ ansible_distribution_version }}"
+
+      - name: Debugs
+        debug:
+          msg: 
+            - "{{OS}} {{TYPE}}"
+
+      rescue:
+      - name: Log output for SYNTBOT when failed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task {{ansible_failed_task.name}} failed {{ansible_failed_result.msg}} on {{ansible_host}}"
+            - "SYNTBOT_DISPLAY: FAILED: Task {{ansible_failed_task.name}} failed {{ansible_failed_result.msg}} on {{ansible_host}}"
+        failed_when: True
+#------------------------------------------------------------------------------------------------
+- name: Playbook CheckPrerequisite for upgrade W2K12 to W2K16
+  gather_facts: false
+  hosts: "{{ HOSTS|lower }}"
+  vars:
+    HOSTS:
+    FILER: ''
+    code_var:
+      - "|20100| Precheck FAILED : You must use ADMINISTRATOR Account"
+      - "|20200| Precheck FAILED : The CheckPrerequisites.xml file is missing"
+      - "|20210| Precheck FAILED : The CheckPrerequisites.xml file can't be read"
+      - "|20220| Precheck FAILED : Unsupported OS : OS version must be Windows 2012 ({{HOSTS}} is running {{OS}} {{TYPE}})"
+      - "|20666| Precheck FAILED : Unknown error detected. Check the transcript log file locally on the host for more information"
+      - "|21010| Precheck FAILED : Cluster service (ClusSvc) found. The target host is a member of an MSCS cluster"
+      - "|21020| Precheck FAILED : At least one SQL instance installed on the target host is too old, an SQL upgrade is required before the Windows upgrade"
+      - "|21030| Precheck FAILED : Not enough free space on the system (C:) disk. At least '40' GB of free space is required for upgrade"
+      - "|21040| Precheck FAILED : Disk 'D:' does not exist or it is not a type '3' (Local hard disk)"
+      - "|21050| Precheck FAILED : Not enough free space on the D: disk. At least '30' GB of free space is required for upgrade"
+      - "|22000| Precheck FAILED : Free space on disk C:\ and/or disk D:\ does not meet the prerequisites for migration, at least 20 GB of free space is required for migration"
+      - "|1010011010| Precheck FAILED : Another instance of this migration script is running"
+      - "|-2146234327| Precheck FAILED : Unknown error script CheckPrerequisites.cmd Failed" 
+
+  tasks:
+    - block:
+
+      - name: Check input variable ISO_FILE
+        assert:
+          that:
+            - ISO_FILE | mandatory
+            - ISO_FILE is defined
+
+      - name: Force Hostname to Lower case
+        set_fact:
+          HOSTS: "{{HOSTS|lower}}"
+
+      - name: Set Temporary Path D:/Temp/Upgrade_W2K12_W2K16 on {{HOSTS}}
+        set_fact:
+          TEMP_PATH: 'D:/Temp/Upgrade_W2K12_W2K16/'
+
+      - name: Create directory {{TEMP_PATH}} if doesn't exist
+        win_file:
+          path: '{{item}}'
+          state: directory
+        with_items:
+          - "{{TEMP_PATH}}"
+
+      - name: Execute task wk12 precheck
+        include_tasks: tasks/task-w2k12-upgrade-precheck.yml
+          
+      - name: Log output for SYNTBOT when successful main
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: Check Prerequisites for upgrade W2K12 to W2K16 is SUCCESS and {{ansible_host}} is running {{OS}} {{TYPE}}"
+
+#---------------------------------------------------------------------------------------------------------
+      rescue:
+
+       - name: Exit because the pre-check is failed
+         meta: end_play 
+         when: (ERROR_CODE is defined) and (ERROR_CODE|length > 0)
+
+       - name: Log output for SYNTBOT when Failed main
+         debug:
+           msg:
+             - "SYNTBOT_OUTPUT: FAILED: Task {{ansible_failed_task.name}} failed {{ansible_failed_result.msg}} on {{ansible_host}}"
+             - "SYNTBOT_DISPLAY: FAILED: Task {{ansible_failed_task.name}} failed {{ansible_failed_result.msg}} on {{ansible_host}}"
+         failed_when: True
+
+      always:
+       - name: Delete 7z.dll and 7z.exe
+         win_file:
+           path: "{{ item }}"
+           state: absent
+         with_items:
+           - "{{TEMP_PATH}}/7z.dll"
+           - "{{TEMP_PATH}}/7z.exe"
+
+#---------------------------------------------------------------------------------------------------------
