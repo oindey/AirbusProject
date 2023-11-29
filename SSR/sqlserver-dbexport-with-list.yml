@@ -1,0 +1,206 @@
+---
+# SQL Server Databse Export (Backup)
+- name: Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+  vars:
+    HOSTS:
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED :  This target host {{ HOSTS }} does not exist in Tower Ansible Inventory 2L22"
+            - "SYNTBOT_DISPLAY: "
+        failed_when: True
+
+- name: Playbook check if host is Windows
+  gather_facts: false
+  hosts: "{{ HOSTS }}"
+  vars:
+    HOSTS:
+
+  tasks:
+    - block:
+      - name: "Fail if Variable ansible_connection is not winrm"
+        assert:
+          that:
+            - ansible_connection == "winrm"
+          msg: "Playbook is for Windows not Linux"
+
+      rescue:
+      - name: Invalid OS for this playbook
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: {{ HOSTS }} is a NOT Windows cannot run this playbook"
+        failed_when: True
+
+
+- name: Playbook Database Backup
+  gather_facts: false
+  hosts: "{{ HOSTS }}"
+  vars:
+    HOSTS:
+    SQLINSTANCEPORT:
+    SQLDBNAME:
+    CHANGENUMBER:
+    USERACCOUNT:
+    LIST_USERS:
+    R_USERS:
+    MSG_USERS: ''
+    TARGETLOCATION:
+
+  tasks:
+    - block:
+      - name: Copy ./files/sqlserver-dbexport.sql to "{{ HOSTS }}"
+        win_copy:
+          src: ./files/sqlserver-dbexport.sql
+          dest: C:/Temp/sqlserver-dbexport.sql
+        register: result_copy_sql
+
+      - name: Copy ./files/sqlserver-dbexport-database.sql to "{{ HOSTS }}"
+        win_copy:
+          src: ./files/sqlserver-dbexport-database.sql
+          dest: C:/Temp/sqlserver-dbexport-database.sql
+        register: result_copy_sql2
+
+      - name: Copy ./files/sqlserver-dbexport.ps1 to "{{ HOSTS }}"
+        win_copy:
+          src: ./files/sqlserver-dbexport.ps1
+          dest: C:/Temp/sqlserver-dbexport.ps1
+        register: result_copy
+
+      - set_fact: ScriptCopyIsOk = "ok"
+      
+      - name: Create {{ CHANGENUMBER }} directory in {{ TARGETLOCATION }}
+        win_file:
+          path: "{{ TARGETLOCATION }}\\{{ CHANGENUMBER }}"
+          state: directory
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+      
+      - name: Add {{ USERACCOUNT }} in {{ CHANGENUMBER }} directory ACLs
+        win_acl:
+          path: "{{ TARGETLOCATION }}\\{{ CHANGENUMBER }}"
+          user: "EU\\{{ USERACCOUNT }}"
+          rights: FullControl
+          type: allow
+          state: present
+          inherit: ContainerInherit, ObjectInherit
+          propagation: 'None'
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+    
+      - name: Disable and copy inherited ACE for {{ CHANGENUMBER }} directory if server is restricted
+        win_acl_inheritance:
+          path: "{{ TARGETLOCATION }}\\{{ CHANGENUMBER }}"
+          state: absent
+          reorganize: yes
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+        when: RESTRICTED == "true"
+
+      - name: Remove backbone-adm-backoff-abc in {{ CHANGENUMBER }} directory ACLs if server is restricted
+        win_acl:
+          path: "{{ TARGETLOCATION }}\\{{ CHANGENUMBER }}"
+          user: "EU\\backbone-adm-backoff-abc"
+          #rights: Read,Write,Modify,FullControl,Delete
+          rights: Modify
+          type: allow
+          state: absent
+          #inherit: ContainerInherit, ObjectInherit
+          propagation: 'None'
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+        when: RESTRICTED == "true"
+    
+      - name: Add additional users in {{ CHANGENUMBER }} directory ACLs
+        win_acl:
+          path: "{{ TARGETLOCATION }}\\{{ CHANGENUMBER }}"
+          user: "EU\\{{ item }}"
+          rights: FullControl
+          type: allow
+          state: present
+          inherit: ContainerInherit, ObjectInherit
+          propagation: 'None'
+        with_items: "{{ LIST_USERS }}"
+        ignore_errors: yes
+        register: R_USERS
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+        when: LIST_USERS|length|int > 0
+    
+      - name: "warning if all users cannot got ACL"
+        set_fact:
+          MSG_USERS: "-- WARNING: some USERS haven t right on the share"
+        when: LIST_USERS|length|int > 0 and R_USERS.failed is defined
+
+      - name: Execute Powershell C:/Temp/sqlserver-dbexport.ps1 "{{ SQLINSTANCEPORT }}" "{{ SQLDBNAME }}"
+        win_command: powershell.exe -ExecutionPolicy ByPass -File C:/Temp/sqlserver-dbexport.ps1 "{{ SQLINSTANCEPORT }}" "{{ SQLDBNAME }}"
+        register: ExportResult
+        changed_when: false
+      
+      - name: "Copy Backup files to Target Location"
+        win_copy:
+          src: "{{ item }}"
+          remote_src: yes
+          dest: "{{ TARGETLOCATION }}\\{{ CHANGENUMBER }}\\"
+        with_items: "{{ ExportResult.stdout_lines }}"
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+      
+      - name: Exported file list check
+        fail:
+          msg: "Exported file list is EMPTY"
+        when: ExportResult.stdout_lines is not defined
+        
+      - name: Remove local file
+        win_file:
+          path: "{{ item }}"
+          state: absent
+        with_items: "{{ ExportResult.stdout_lines }}"
+          
+      - name: Log output for SYNTBOT when successful
+        debug:
+          msg: 
+            - "SYNTBOT_OUTPUT: SUCCESSFUL on {{ HOSTS }}"
+            - "SYNTBOT_DISPLAY: CLOSED COMPLETE - Exported file(s) {{ ExportResult.stdout_lines | to_nice_yaml }} to {{ TARGETLOCATION }}\\{{ CHANGENUMBER }} {{ MSG_USERS }}"
+       
+      rescue:
+        - name: Log output for SYNTBOT FAILED
+          debug:
+            msg:
+              - "SYNTBOT_OUTPUT: FAILED : Task {{ ansible_failed_task.name }} failed on {{ HOSTS }} - rc {{ ansible_failed_result.rc }}"
+              - "SYNTBOT_DISPLAY: DBEXPORT FAILED"
+          failed_when: true
