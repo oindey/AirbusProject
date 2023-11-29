@@ -1,0 +1,47 @@
+---
+- name: Playbook Get SQLServer Instance (SQLserver fr0-vsiaas-4725)
+  gather_facts: false
+  hosts: "fr0-vsiaas-4725.eu.airbus.corp"
+  vars:
+    THISHOST: fr0-vsiaas-4725.eu.airbus.corp
+    HOSTS: 
+    DISKFREESPACETHRESHOLDPC:
+
+  tasks:
+    - block:
+      - name: Copy ./files/sqlserver-getinstance.ps1 to {{ THISHOST }}
+        win_copy:
+          src: ./files/sqlserver-getinstance.ps1
+          dest: C:/Temp/sqlserver-getinstance.ps1
+        register: result_copy
+
+      - name: Execute Powershell C:/Temp/sqlserver-getinstance.ps1 "{{ HOSTS }}"
+        win_command: powershell.exe -ExecutionPolicy ByPass -File C:/Temp/sqlserver-getinstance.ps1 "{{ HOSTS }}"
+        register: result
+
+      - name: Assert that powershell doesn t return EMPTY 
+        assert:
+          that: "'EMPTY' not in result.stdout"
+          fail_msg: "EMPTY keyword was detected in powershell output"
+
+      - name: Log output for SYNTBOT when successfull
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL - on {{ THISHOST }}"
+           - "SYNTBOT_PARAM1: {{ HOSTS }}"
+           - "SYNTBOT_PARAM2: {{ result.stdout|trim }}"
+           - "SYNTBOT_PARAM3: {{ DISKFREESPACETHRESHOLDPC }}"
+
+      rescue:
+      - name: Log output for SYNTBOT FAILED
+        debug:
+          msg: 
+           - "SYNTBOT_OUTPUT:  FAILED : Task {{ ansible_failed_task.name}} failed on {{ THISHOST }} : {{ ansible_failed_result.msg }}"
+           - "SYNTBOT_DISPLAY: {{ result.stdout|trim }}"
+        failed_when: true 
+
+      always:
+      - name: "Remove temporary files"
+        win_file:
+          path: 'C:/Temp/sqlserver-getinstance.ps1'
+          state: absent
