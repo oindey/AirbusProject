@@ -1,0 +1,193 @@
+---
+- name: Playbook check if host exists in inventory
+  gather_facts: false
+  hosts: localhost
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: This target host {{ HOSTS }} does not exist in the Ansible Tower Inventory 2L22"
+        failed_when: True
+
+- name: Playbook check if host is Windows
+  gather_facts: false
+  hosts: "{{ HOSTS }}"
+  vars:
+    HOSTS:
+  tasks:
+    - block:
+      - name: "Fail if Variable ansible_connection is not winrm "
+        assert:
+          that:
+            - ansible_connection == "winrm"
+          msg: "Playbook is for Windows not Linux"
+
+      rescue:
+      - name: Invalid OS for this playbook
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: {{ HOSTS }} is a Linux cannot run this playbook"
+        failed_when: True
+
+- name: Playbook Get application Logs
+  hosts: "{{ HOSTS }}"
+  gather_facts: false
+  vars:
+    HOSTS: 
+    LOG_FILES: ""
+    FILER: ""
+    USER: ""
+    RITM: ""
+    SLASH: '/'
+    BSLASH: '\'
+    WINFILER: "{{ FILER | replace (SLASH,BSLASH)}}"
+    ZIPFILE: 'C:\Temp\{{inventory_hostname_short}}_logs.zip'
+    LIST_USERS: ''
+    MSG_USERS: ''
+
+  tasks:
+    - block:
+      - name: convert list to string
+      # no more multiple files
+        set_fact:
+          LOG: "{{item}}"
+        with_items:
+          - "{{ LOG_FILES }}"
+
+      - name: "checking input parameters are  not empty"
+        assert:
+          that: ( item is defined ) and ( item | length > 0 )
+          fail_msg: "At least a parameter is empty"
+        with_items:
+          - "{{FILER}}"
+          - "{{RITM}}"
+          - "{{USER}}"
+
+      - name: "checking log {{LOG}} files exist"
+        win_stat:
+          path: "{{ LOG }}"
+          get_checksum: false
+        register: result
+
+      - name: Check if {{LOG}} exists
+        fail:
+          msg: "{{LOG}} does not exist"
+        when: result.stat.exists == false
+
+      - name: "Get directory size"
+        win_command: powershell.exe '"{0:N0}"' -f ((gci "{{ result.stat.path }}" -Recurse -ErrorAction SilentlyContinue | measure Length -s).sum / 1Mb)
+        register : dir_size
+        changed_when: false
+        when: result.stat.isdir
+
+      - name: remove , from size
+        set_fact:
+          size: "{{dir_size.stdout|replace(',','')|trim}}"
+        when: result.stat.isdir
+
+      - name: "check directory size is less than 50M"
+        assert:
+          that: size|int < 50
+          fail_msg: "{{ result.stat.path }} has a size of {{size|int}}M > 50M"
+        when: result.stat.isdir
+
+      - name: "create zip with directory contents"
+        win_command: powershell.exe Compress-Archive -Force -Path "{{ result.stat.path }}" -DestinationPath "{{ ZIPFILE }}" -CompressionLevel Fastest
+        when: result.stat.isdir
+
+      - name: "works on zip instead of log"
+        set_fact:
+          LOG: "{{ ZIPFILE }}"
+        when: result.stat.isdir
+
+      - name: "Create Directory on Filer"
+        win_file:
+          path: "{{FILER}}\\{{ RITM }}"
+          state: directory
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+      
+      - name: "Add {{ USER }} rights on directory"
+        win_acl:
+          path: "{{FILER}}\\{{ RITM }}"
+          user: "{{ USER }}@eu.airbus.corp"
+          rights: FullControl
+          type: allow
+          state: present
+          inherit: ContainerInherit, ObjectInherit
+          propagation: 'None'
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+
+      - name: "Add rights on directory for a list of users"
+        win_acl:
+          path: "{{FILER}}\\{{ RITM }}"
+          user: "{{ item | trim }}@eu.airbus.corp"
+          rights: FullControl
+          type: allow
+          state: present
+          inherit: ContainerInherit, ObjectInherit
+          propagation: 'None'
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+        with_items: "{{ LIST_USERS }}"
+        ignore_errors: yes
+        register: R_USERS
+        when: LIST_USERS|length|int > 0
+
+      - name: "warning if all users cannot got rights"
+        set_fact:
+          MSG_USERS: "WARNING: some USERS haven t right on the share"
+        when: LIST_USERS|length|int > 0 and R_USERS.failed is defined and  R_USERS.failed == true
+
+      - name: "Copy Log files on Filer"
+        win_copy: 
+          src: "{{ LOG }}"
+          remote_src: yes
+          dest: "{{FILER}}\\{{ RITM }}\\"
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+        when: LOG is not search('evtx')
+
+      - name: "Copy Event files on Filer"
+        win_shell: "copy {{ LOG }} {{FILER}}\\{{ RITM }}\\"
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+        when: LOG is search('evtx')
+        
+      - name: Log output for SYNTBOT
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: SUCCESSFUL: Log File {{ LOG }} have been copied from {{ HOSTS }} to {{ WINFILER }}\\{{RITM}} {{ MSG_USERS }}"
+
+      rescue:
+      - name: "FAILED log for Syntbot"
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: Task {{ ansible_failed_task.name}} failed"
+        failed_when: True
