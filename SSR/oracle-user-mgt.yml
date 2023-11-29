@@ -1,0 +1,312 @@
+---
+- name: Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory 2L22"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: 
+          - "{{HOSTS}}"
+          - "fr0-viaas-5412.eu.airbus.corp"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED:  This target host {{ HOSTS }} does not exist in Tower Ansible Inventory 2L22"
+        failed_when: True
+#---------------------------------------------------------------------------------------------
+- name: Playbook Oracle user mgt (ostd_user_mgt)
+  gather_facts: true
+  hosts: "{{ HOSTS }}"
+  become: true
+  vars:
+   HOSTS:
+   ORACLE_SID:
+   USER:
+   ACTION:
+   MAIL:
+   TABLESPACE_DEFAULT:
+   TABLESPACE_TEMP:
+   SRVDEST: fr0-viaas-5412.eu.airbus.corp
+   REMOTE_USR: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+   REMOTE_PWD: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+   BINSSH: "{{ 'sshpass_rh6' if ansible_distribution_version < '7' else 'sshpass_rh7' }}"
+   code_var:
+      - "|0| OK Execution succeeded"
+      - "|1| Inputs from requester are not good"
+      - "|2| Wrong node (launched on Standby)"
+      - "|3| Error during execution (DBA action is required)"
+
+  tasks:
+    - block:
+      - name: pick up the lines we are interested in
+        set_fact:
+          important_lines: "{{ important_lines|default([]) +  [item] }}"
+        when: item.split('|')
+        with_items:
+          - "{{ code_var }}"
+
+      - name: Check if ORACLE_SID or USER or ACTION is provided
+        assert:
+          that:
+            - ORACLE_SID | mandatory and  ORACLE_SID is defined and ORACLE_SID is string
+            - USER | mandatory and  USER is defined and USER is string
+            - ACTION | mandatory and  ACTION is defined and ACTION is string
+            - ACTION == "create" or ACTION == "remove"
+          msg: "Please provide ORACLE_SID or USER or ACTION (create / remove)"
+
+      - name : Check if MAIL exist when ACTION is create
+        assert: 
+          that:
+            - MAIL | mandatory and  MAIL is defined and MAIL is string
+          msg: "Please provide MAIL when ACTION is (create)"
+        when: ACTION == "create" 
+       
+      - name: Check if /etc/oratab exist on {{ HOSTS }}
+        stat: 
+          path: /etc/oratab
+        register: oratab
+
+      - name: Fail if /etc/oratab does not exist on {{ HOSTS }}
+        fail: 
+          msg: "/etc/oratab does not exist"
+        when: oratab.stat.exists == false
+
+      - name: Copy scripts to target host {{ HOSTS }}
+        copy:
+          src: "{{ item.src }}"
+          dest: "{{ item.dest }}"
+          mode: 0775
+          owner: oracle
+          group: dba
+        with_items:
+          - { src: 'files/ostd_user_mgt',dest: '/tmp/ostd_user_mgt'}
+
+      - name: Get HOME directory Oracle
+        become_user: oracle
+        become: true 
+        shell: |
+          .  ~oracle/.profile && echo "$HOME"
+        register: home
+        args:
+          executable: /bin/bash
+
+      - name: Check if {{home.stdout}}/tools/environ exists
+        stat:
+          path: "{{home.stdout}}/tools/environ"
+        register: env_exist
+
+      - name: Fail when {{home.stdout}}/tools/environ doesn't exist
+        fail:
+          msg:  "{{home.stdout}}/tools/environ desn't exist"
+        when: env_exist.stat.exists == false
+
+      - name: "Copy sshpass {{BINSSH}} to {{HOSTS}}"
+        copy:
+          src: "files/{{ BINSSH }}"
+          dest: "/tmp/"
+          owner: root
+          mode: 0540
+        when: ACTION is defined and ACTION == 'create'
+
+      - name: Create ostd_user_mgt -s {{ORACLE_SID}} -u {{USER}} -t {{TABLESPACE_DEFAULT}} -y {{TABLESPACE_TEMP}} -a {{ACTION}}
+        become_user: oracle
+        become: true
+        shell: |
+          .  ~oracle/.profile && \
+          source ~/tools/environ/oraenv{{ORACLE_SID}} && \
+          /tmp/ostd_user_mgt -s {{ORACLE_SID}} -u {{USER}} -t {{TABLESPACE_DEFAULT}} -y {{TABLESPACE_TEMP}} -a {{ACTION}}
+        register: result_create
+        when: ACTION is defined and ACTION == 'create'
+
+      - name: Remove ostd_user_mgt -s {{ORACLE_SID}} -u {{USER}} -a {{ACTION}}
+        become_user: oracle
+        become: true
+        shell: |
+          .  ~oracle/.profile && \
+          source ~/tools/environ/oraenv{{ORACLE_SID}} && \
+          /tmp/ostd_user_mgt -s {{ORACLE_SID}} -u {{USER}} -a {{ACTION}}
+        register: result_remove
+        when: ACTION is defined and ACTION == 'remove'
+
+      - name: Set VARIABLE and send email when execution is succeeded
+        set_fact:
+          SUBJECT: 'AUTOMATION DB administration ( CREATE ) {{USER}}'
+          BODY: '{{ORACLE_SID}}'
+          ATTACH_FILE: /tmp/{{ORACLE_SID}}_{{USER}}.png
+          MESSAGE: "SUCCESSFUL - {{ACTION}} {{USER}} on {{ORACLE_SID}} for {{ansible_host}}\n {{result_create.stdout|regex_findall('^#.*',multiline=True)|to_nice_json}}"
+          STATUS: Succeeded
+        when: ACTION == 'create'
+
+      - name: Copy file to {{SRVDEST}}
+        shell: "/tmp/{{ BINSSH }} -v -e scp -o StrictHostKeyChecking=no  /tmp/{{ORACLE_SID}}_{{USER}}.pwd {{REMOTE_USR}}@{{SRVDEST}}:/tmp/"
+        environment:
+          SSHPASS: "{{ REMOTE_PWD }}"
+        when: ACTION == 'create'
+
+      - name: Convert text file to image file (pango-view -qo {{ATTACH_FILE}}  /tmp/{{ORACLE_SID}}_{{USER}}.pwd)
+        shell: pango-view -qo {{ATTACH_FILE}}   /tmp/{{ORACLE_SID}}_{{USER}}.pwd
+        delegate_to: "{{SRVDEST}}"
+        vars:
+          ansible_ssh_user: "{{REMOTE_USR}}"
+          ansible_ssh_pass: "{{REMOTE_PWD}}"
+          ansible_become: yes
+          ansible_become_method: sudo
+          ansible_become_user: root
+          ansible_become_password: "{{REMOTE_PWD}}"
+        when: ACTION == 'create'
+
+      - name: Copy file to {{HOSTS}}
+        shell: "/tmp/{{ BINSSH }} -v -e scp -o StrictHostKeyChecking=no  {{REMOTE_USR}}@{{SRVDEST}}:/tmp/{{ORACLE_SID}}_{{USER}}.png /tmp/"
+        when: ACTION == 'create'
+        environment:
+          SSHPASS: "{{ REMOTE_PWD }}"
+
+      - name: "Delete temporary file /tmp/{{ORACLE_SID}}_{{USER}}.pwd"
+        file:
+          path: "{{item}}"
+          state: absent
+        with_items: 
+            - /tmp/{{ORACLE_SID}}_{{USER}}.pwd
+            - /tmp/{{ORACLE_SID}}_{{USER}}.png
+        when: ACTION == 'create'
+        delegate_to: "{{SRVDEST}}"
+        vars:
+          ansible_ssh_user: "{{REMOTE_USR}}"
+          ansible_ssh_pass: "{{REMOTE_PWD}}"
+          ansible_become: yes
+          ansible_become_method: sudo
+          ansible_become_user: root
+          ansible_become_password: "{{REMOTE_PWD}}"
+
+      - name: Send Emails to {{MAIL}}
+        mail:
+          host: smtp.airbus.corp
+          port: 25
+          subject: '{{SUBJECT}} {{STATUS}}'
+          body: '{{BODY}}: {{MESSAGE}}'
+          from: no-reply-ansible@airbus.com
+          to: '{{ MAIL }}'
+          attach:
+            - '{{ATTACH_FILE}}'
+        when: ACTION == 'create'
+
+      - name: Log output for SYNTBOT OK for create
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: {{ACTION}} {{USER}} on {{ORACLE_SID}} for {{ansible_host}}"
+           - "SYNTBOT_DISPLAY: Exit Code = 0 OK"
+           - "{{ result_create.stdout }}"
+        when: ACTION == 'create'
+
+      - name: Log output for SYNTBOT OK for remove
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: Remove user: {{USER}} on {{ORACLE_SID}} for {{ansible_host}}"
+           - "SYNTBOT_DISPLAY: Exit Code = 0 OK"
+           - "{{ result_remove.stdout }}"
+        when: ACTION == 'remove'
+
+      - name: Delete files on {{ HOSTS }}
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - /tmp/{{ORACLE_SID}}_{{USER}}.pwd
+          - /tmp/{{ORACLE_SID}}_{{USER}}.png
+#------------------------------------------------------------------------------------------------------------
+      rescue:
+      - name: Log output for SYNTBOT when failed 
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task {{ansible_failed_task.name}} on {{ansible_host}} {{ ansible_failed_result.msg }}"
+        failed_when: True
+        when: result_create is not defined
+
+      - name: End play because other error
+        meta: end_play
+        when: result_create is not defined
+
+      - name: Get ERROR_CODE from LOG file create
+        set_fact:
+          ERROR_CODE: "{{ item.split(':')[1] }}"
+        when: item|trim is search('Exit Code :')
+        with_items:
+          - "{{ result_create.stdout_lines }}"
+        loop_control:
+          label: "{{ item.split(' ')[0] }}"
+        ignore_errors: true
+
+      - name: Get ERROR_CODE from LOG file remove
+        set_fact:
+          ERROR_CODE: "{{ item.split(':')[1] }}"
+        when: item|trim is search('Exit Code :')
+        with_items:
+          - "{{ result_remove.stdout_lines }}"
+        loop_control:
+          label: "{{ item.split(' ')[0] }}"
+        ignore_errors: true
+
+      - name: set fact
+        set_fact:
+          CODE: "{{ERROR_CODE | int}}"
+      - name: debug
+        debug:
+          msg: "error code : '{{ERROR_CODE}}' {{CODE}}"
+
+      - name: Find the line with the name we are looking for in 2nd colum
+        set_fact:
+          target_line: "{{ item }}"
+        when: item|trim is search(CODE) 
+        with_items:
+          - "{{ important_lines }}"
+
+      - name: get the attributes from the target lin
+        set_fact:
+          attribute: "{{ target_line.split('|')[2]|trim }}"
+
+      - name: Task Set MESSAGE for send email FAILED
+        set_fact:
+          SUBJECT: 'AUTOMATION DB administration ( {{ACTION}} ) {{USER}}'
+          BODY: '{{ACTION}}'
+          MESSAGE: "FAILED - {{ACTION}} {{USER}} on {{ORACLE_SID}} on host {{ansible_host}} \n {{result_create.stdout|regex_findall('^#.*',multiline=True)|to_nice_json}}"
+          STATUS: "Failed"
+        when: ACTION == "create"
+
+      #- name: Send email when FAILED {{MAIL}}
+        #include_tasks: "tasks/sendmail.yml"
+        #when: ACTION == "create"
+
+      - name: Log output for SYNTBOT when failed  on create {{USER}}
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task {{ansible_failed_task.name}} on {{ansible_host}} {{ ansible_failed_result.msg }}"
+            - "SYNTBOT_DISPLAY: Exit Code = {{ ERROR_CODE }} {{ attribute }}"
+            - "{{result_create.stdout}}"
+        failed_when: True
+        when: ACTION == "create" 
+
+      - name: 'Log output for SYNTBOT when failed on remove {{USER}}'
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task {{ansible_failed_task.name}} on {{ansible_host}} {{ ansible_failed_result.msg }}"
+            - "SYNTBOT_DISPLAY: Exit Code = {{ ERROR_CODE }} {{ attribute }}"
+            - "{{result_remove.stdout}}"
+        failed_when: True
+        when: ACTION == "remove" 
+
+      always:
+      - name: Delete files on {{ HOSTS }}
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - /tmp/sshpass*
+          - /tmp/ostd_user_mgt
+          - /tmp/{{ORACLE_SID}}_{{USER}}.pwd
+          - /tmp/{{ORACLE_SID}}_{{USER}}.png
+#-------------------------------------------------------------------------------------------
