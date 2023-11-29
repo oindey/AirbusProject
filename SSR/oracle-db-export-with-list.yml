@@ -1,0 +1,379 @@
+---
+- name: Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory 2L22"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED:  This target host {{ HOSTS }} does not exist in Tower Ansible Inventory 2L22"
+        failed_when: True
+
+#---------------------------------------------------------------------------------------------
+- name: Playbook check if host is Linux
+  gather_facts: false
+  hosts: "{{ HOSTS }}"
+  vars:
+    HOSTS:
+
+  tasks:
+    - block:
+      - name: "Fail if Variable ansible_connection is winrm"
+        assert:
+          that:
+            - ansible_connection != "winrm"
+          msg: "Playbook is for Linux not Windows"
+
+      rescue:
+      - name: Invalid OS for this playbook
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: {{ HOSTS }} is a Windows cannot run this playbook"
+        failed_when: True
+#---------------------------------------------------------------------------------------------
+- name: Playbook DB EXPORT SCHEMA / FULL on {{HOSTS}}
+  gather_facts: true
+  hosts: "{{HOSTS}}"
+  become: true
+  vars:
+   HOSTS:
+   ORACLE_SID:
+   SCHEMA:
+   FILERMOUNTER: "{{ HOSTS }}"
+   FILER: '' 
+   LINFILER: "{{ '//fr0-svm09.eu.airbus.corp/abc-automation-tls'  if( FILER is search('fr0-svm09')) else '//de0-svm07.eu.airbus.corp/abc-automation-ham' }}"
+   WINFILER: "{{ '\\\\fr0-svm09.eu.airbus.corp\\abc-automation-tls'  if( FILER is search('fr0-svm09')) else '\\\\de0-svm07.eu.airbus.corp\\abc-automation-ham' }}"
+   mount_point: "/mnt_{{ansible_uptime_seconds}}"
+   CHANGE_NB: ''
+   USER: ''
+   LIST_USERS: ''
+   MSG_USERS: ''
+   R_USERS: ''
+   RESTRICTED: ''
+
+  tasks:
+    - block:
+
+      - name: Check that ORACLE_SID is provided and must be string
+        assert:
+          that:
+            - ORACLE_SID | mandatory
+            - ORACLE_SID is defined
+            - ORACLE_SID is string
+            - CHANGE_NB | mandatory
+            - CHANGE_NB is string
+            - USER | mandatory
+            - USER is string
+            - SCHEMA | mandatory
+            - SCHEMA is defined
+          msg: "Parameter ORACLE_SID / CHANGE_NB  / SCHEME or USER is not set correctly"
+
+      - name: Check that FILER must be fr0-svm09 or de0-svm07
+        assert:
+          that:
+            - FILER == "fr0-svm09" or FILER == "de0-svm07"
+          msg: "Parameter FILER must be fr0-svm09 or de0-svm07"
+
+      - name: set_fact HOST_NAME
+        set_fact:
+          HOST_NAME: "{{ansible_hostname.split('.')[0]|upper|regex_replace('-','_')}}"
+
+      - name: Check Redhat version must be > 4
+        fail:  
+          msg:
+            - 'Redhat version must be > 4'
+            - 'This server is {{ansible_distribution}} : {{ansible_distribution_major_version}}'
+        when: ansible_distribution == "RedHat" and ansible_distribution_major_version < '5'
+
+      - name: Check if /etc/oratab exist on {{HOSTS}}
+        stat: 
+          path: /etc/oratab
+        register: oratab
+
+      - name: Fail if /etc/oratab does not exist on {{HOSTS}}
+        fail: 
+          msg: "/etc/oratab does not exist"
+        when: oratab.stat.exists == false
+
+      - name: Get all instances ORACLE_SID from /etc/oratab on {{HOSTS}}
+        shell: "cat /etc/oratab|grep -v ^#|grep ^[A-Z]|cut -d: -f1" 
+        register: ora_sid
+
+      - name: Check if oracle_sid:{{ORACLE_SID}} exist on {{HOSTS}}
+        assert:
+          that: "ORACLE_SID in ora_sid.stdout"
+          msg: "ORACLE_SID:{{ORACLE_SID}} does not exist on {{HOSTS}}"
+            
+      - name: Check if path /home/oracle/tools/bin/ostd_expdp exist on {{HOSTS}}
+        stat: 
+          path: /home/oracle/tools/bin/ostd_expdp
+        register: ostd_expdp
+
+      - name: OSTD_EXPDP is /home/oracle/tools/bin/ostd_expdp
+        set_fact: OSTD_EXPDP=/home/oracle/tools/bin/ostd_expdp
+        when: ostd_expdp.stat.exists == True
+
+      - name: Check if path /local/home/oracle/tools/bin/ostd_expdp exist on {{HOSTS}}
+        stat: 
+          path: /local/home/oracle/tools/bin/ostd_expdp
+        register: local_ostd_expdp
+        when: ostd_expdp.stat.exists == false
+
+      - name: OSTD_EXPDP is /local/home/oracle/tools/bin/ostd_expdp
+        set_fact: OSTD_EXPDP=/local/home/oracle/tools/bin/ostd_expdp
+        when: ostd_expdp.stat.exists == false and local_ostd_expdp.stat.exists == True
+
+      - name: Fail if /home/oracle/tools/bin/ostd_expdp or /local/home/oracle/tools/bin/ostd_expdp does not exist
+        fail:
+          msg: "/home/oracle/tools/bin/ostd_expdp or /local/home/oracle/tools/bin/ostd_expdp does not exist"
+        when: ostd_expdp.stat.exists == false and local_ostd_expdp.stat.exists == false
+
+      - name: Set FILER mounter for RH < 7 {{ansible_distribution_version}}
+        set_fact:
+          FILERMOUNTER: "{{ 'fr0-viaas-3357.eu.airbus.corp' if( FILER is search('fr0-svm09')) else 'de0-viaas-280.eu.airbus.corp'}}"
+          MOUNT: "{{ '/abc-automation-tls' if( FILER is search('fr0-svm09')) else '/abc-automation-ham'}}"
+        when: ansible_distribution_version < '7'
+
+      - name: Install cifs-utils on {{HOSTS}}
+        yum:
+          name: cifs-utils
+          state: installed
+        when: ansible_distribution_version >= '7'
+
+      - name: "create credential file for cifs mount for RH>=7"
+        file:
+          path: /2L22.cred
+          owner: root
+          group: root
+          mode: '0600'
+          state: touch
+        when: ansible_distribution_version >= '7'
+
+      - name: "add credentials into credfile for cifs mount for RH>=7"
+        blockinfile:
+          path: /2L22.cred
+          block: |
+            username={{ lookup("env", "OVIRT_USERNAME") }}
+            domain=EU
+            password={{ lookup("env", "OVIRT_PASSWORD") }}
+        when: ansible_distribution_version >= '7'
+
+      - name: Mount {{LINFILER}} on {{mount_point}} on {{HOSTS}}
+        mount:
+          path: "{{mount_point}}"
+          fstype: cifs
+          src: "{{LINFILER}}"
+          opts: "vers=3,credentials=/2L22.cred,iocharset=utf8"
+          state: mounted
+        when: ansible_distribution_version >= '7'
+
+      - name: Create directory {{mount_point}}/{{ CHANGE_NB }} on Filer {{FILER}} when RH >7
+        file:
+          path: "{{mount_point}}/{{ CHANGE_NB }}"
+          state: directory
+        when: ansible_distribution_version >= '7'
+
+      - name: Create directory on Filer {{FILER}} if {{HOSTS}} when RH <7
+        file:
+          path: "{{MOUNT}}/{{ CHANGE_NB }}"
+          state: directory
+        delegate_to: "{{ FILERMOUNTER }}"
+        vars:
+          ansible_ssh_user: '{{ lookup("env", "OVIRT_USERNAME") }}'
+          ansible_ssh_pass: '{{ lookup("env", "OVIRT_PASSWORD") }}'
+          ansible_become: no
+        when: ansible_distribution_version < '7'
+
+      - name: Disable and copy inherited ACE for directory if RH>=7 and server is restricted
+        # SID: S-1-5-21-878717028-1334384809-310601177-1277996 ==> backbone-adm-backoff-abc
+        shell: "/bin/setcifsacl -M 'ACL:S-1-5-21-878717028-1334384809-310601177-1277996:ALLOWED/OI|CI/R' {{mount_point}}/{{ CHANGE_NB }}" 
+        when: ansible_distribution_version >= '7' and RESTRICTED == "true"
+
+      - name: "Remove backbone-adm-backoff-abc rights on directory if RH>=7 and server is restricted"
+        shell: "/bin/setcifsacl -D 'ACL:S-1-5-21-878717028-1334384809-310601177-1277996:ALLOWED/OI|CI/R' {{mount_point}}/{{ CHANGE_NB }}" 
+        register: BACKOFF
+        failed_when: BACKOFF.rc != 0 and BACKOFF.stdout is not search ('Nothing to delete')
+        when: ansible_distribution_version >= '7' and RESTRICTED == "true"
+
+      - name: Disable and copy inherited ACE for directory if RH<7 and server is restricted
+        shell: "/bin/setcifsacl -M 'ACL:S-1-5-21-878717028-1334384809-310601177-1277996:ALLOWED/OI|CI/R' {{MOUNT}}/{{ CHANGE_NB }}" 
+        delegate_to: "{{ FILERMOUNTER }}"
+        vars:
+          ansible_become: no
+          ansible_ssh_user: '{{ lookup("env", "OVIRT_USERNAME") }}'
+          ansible_ssh_pass: '{{ lookup("env", "OVIRT_PASSWORD") }}'
+        when: ansible_distribution_version < '7' and RESTRICTED == "true"
+
+      - name: "Remove backbone-adm-backoff-abc rights on directory if RH<7 and server is restricted"
+        shell: "/bin/setcifsacl -D 'ACL:S-1-5-21-878717028-1334384809-310601177-1277996:ALLOWED/OI|CI/R' {{MOUNT}}/{{ CHANGE_NB }}" 
+        delegate_to: "{{ FILERMOUNTER }}"
+        vars:
+          ansible_become: no
+          ansible_ssh_user: '{{ lookup("env", "OVIRT_USERNAME") }}'
+          ansible_ssh_pass: '{{ lookup("env", "OVIRT_PASSWORD") }}'
+        register: BACKOFF
+        failed_when: BACKOFF.rc != 0 and BACKOFF.stdout is not search ('Nothing to delete')
+        when: ansible_distribution_version < '7' and RESTRICTED == "true"
+      
+      - name: "Find {{ USER }} SID for ACL rights"
+        win_shell: "(New-Object System.Security.Principal.NTAccount('{{USER}}@eu.airbus.corp')).Translate([System.Security.Principal.SecurityIdentifier]).value"
+        register: ID
+        vars:
+          ansible_become: no
+          ansible_user : '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_password: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+        #delegate_to: fr0-hphop-p04.eu.airbus.corp
+        delegate_to: fr0-viaas-604.eu.airbus.corp
+
+      - name: "Add {{ USER }} allow rights on directory if RH>=7"
+        shell: "/bin/setcifsacl -a 'ACL:{{ ID.stdout|trim }}:ALLOWED/OI|CI/FULL' {{mount_point}}/{{ CHANGE_NB }}"
+        when: ansible_distribution_version >= '7'
+
+      - name: "Add {{ USER }} allow rights on directory if RH<7"
+        shell: "/bin/setcifsacl -a 'ACL:{{ ID.stdout|trim }}:ALLOWED/OI|CI/FULL' {{MOUNT}}/{{ CHANGE_NB }}"
+        delegate_to: "{{ FILERMOUNTER }}"
+        vars:
+          ansible_become: no
+          ansible_ssh_user: '{{ lookup("env", "OVIRT_USERNAME") }}'
+          ansible_ssh_pass: '{{ lookup("env", "OVIRT_PASSWORD") }}'
+        when: ansible_distribution_version < '7'
+      
+      - name: "Find SID for ACL rights for a list of users"
+        win_shell: "(New-Object System.Security.Principal.NTAccount('{{item | trim }}@eu.airbus.corp')).Translate([System.Security.Principal.SecurityIdentifier]).value"
+        register: LIST_IDS
+        with_items: "{{ LIST_USERS }}"
+        vars:
+          ansible_become: no
+          ansible_user : '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_password: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+        #delegate_to: fr0-hphop-p04.eu.airbus.corp
+        delegate_to: fr0-viaas-604.eu.airbus.corp
+        ignore_errors: yes
+        when: LIST_USERS|length|int > 0
+
+      - name: "Add rights on directory for a list of users if RH>=7"
+        shell: "/bin/setcifsacl -a 'ACL:{{ item.stdout|trim }}:ALLOWED/OI|CI/FULL' {{mount_point}}/{{ CHANGE_NB }}"
+        with_items: "{{ LIST_IDS.results }}"
+        loop_control:
+          label: ""
+        ignore_errors: yes
+        when: ansible_distribution_version >= '7' and LIST_USERS|length|int > 0
+
+      - name: "Add rights on directory for a list of users if RH<7"
+        shell: "/bin/setcifsacl -a 'ACL:{{ item.stdout|trim }}:ALLOWED/OI|CI/FULL' {{MOUNT}}/{{ CHANGE_NB }}"
+        with_items: "{{ LIST_IDS.results }}"
+        loop_control:
+          label: ""
+        delegate_to: "{{ FILERMOUNTER }}"
+        vars:
+          ansible_become: no
+          ansible_ssh_user: '{{ lookup("env", "OVIRT_USERNAME") }}'
+          ansible_ssh_pass: '{{ lookup("env", "OVIRT_PASSWORD") }}'
+        ignore_errors: yes
+        register: R_USERS
+        when: ansible_distribution_version < '7' and LIST_USERS|length|int > 0
+
+      - name: "warning if all users cannot got rights"
+        set_fact:
+          MSG_USERS: "WARNING: some USERS haven t right on the share"
+        when: LIST_USERS|length|int > 0 and R_USERS.failed is defined and R_USERS.failed == true
+
+      - name: DB Execute {{OSTD_EXPDP}} -s {{ORACLE_SID}} -u {{SCHEMA}} on {{HOSTS}}
+        become_user: oracle
+        become: true
+        shell: ". $HOME/.profile && {{OSTD_EXPDP}} -s {{ORACLE_SID}} -u {{SCHEMA}} | grep -E 'DUMPFILE=|LOGFILE='"
+        register: db_export
+        args:
+            executable: /bin/bash
+
+      - name: Get name of DUMPFILE in the log file on {{HOSTS}}
+        set_fact:
+          DUMPFILE: "{{ item.split('=')[1] }}"
+        when: item|trim is search('DUMPFILE=')
+        with_items:
+          - "{{ db_export.stdout_lines }}"
+        loop_control:
+          label: "{{ item.split(' ')[0] }}"
+
+      - name: Get name of LOGFILE in the log file on {{HOSTS}}
+        set_fact:
+          LOGFILE: "{{ item.split('=')[1] }}"
+        when: item|trim is search('LOGFILE=')
+        with_items:
+          - "{{ db_export.stdout_lines }}"
+        loop_control:
+          label: "{{ item.split(' ')[0] }}"
+
+      - name: "Copy file {{DUMPFILE}} on Filer {{FILER}} when RH>7"
+        copy:
+          src: '/u07/flash_recovery_area/{{ORACLE_SID}}_{{HOST_NAME}}/export/{{DUMPFILE}}'
+          dest: "{{mount_point}}/{{ CHANGE_NB }}/"
+          remote_src: yes
+        when: ansible_distribution_version >= '7'
+
+      - name: "Copy file {{LOGFILE}} on Filer {{FILER}} when RH>7"
+        copy:
+          src: '/u07/flash_recovery_area/{{ORACLE_SID}}_{{HOST_NAME}}/export/{{LOGFILE}}'
+          dest: "{{mount_point}}/{{ CHANGE_NB }}/"
+          remote_src: yes
+        when: ansible_distribution_version >= '7'
+
+      - name: "Copy execute file sshpass_rh6 to server if RH<7"
+        copy:
+          src: "files/sshpass_rh6"
+          dest: "/tmp/"
+          owner: root
+          mode: 0540
+        when: ansible_distribution_version < '7'
+
+      - name: "Copy file {{DUMPFILE}} with sshpass_rh6 scp when RH<7"
+        shell: "/tmp/sshpass_rh6 -v -e scp -o StrictHostKeyChecking=no /u07/flash_recovery_area/{{ORACLE_SID}}_{{HOST_NAME}}/export/{{DUMPFILE}} {{lookup('env', 'OVIRT_USERNAME')}}@{{FILERMOUNTER}}:{{MOUNT}}/{{CHANGE_NB}}/"
+        environment:
+          SSHPASS: '{{ lookup("env", "OVIRT_PASSWORD") }}'
+        when: ansible_distribution_version < '7'
+
+      - name: "Copy file {{LOGFILE}} with sshpass_rh6 scp when RH<7"
+        shell: "/tmp/sshpass_rh6 -v -e scp -o StrictHostKeyChecking=no /u07/flash_recovery_area/{{ORACLE_SID}}_{{HOST_NAME}}/export/{{LOGFILE}} {{lookup('env', 'OVIRT_USERNAME')}}@{{FILERMOUNTER}}:{{MOUNT}}/{{CHANGE_NB}}/"
+        environment:
+          SSHPASS: '{{ lookup("env", "OVIRT_PASSWORD") }}'
+        when: ansible_distribution_version < '7'
+
+      - name: Log output for SYNTBOT when OK
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: DB Export ORACLE_SID:{{ORACLE_SID}} SCHEMA:{{SCHEMA}} on {{ansible_host}}"
+           - "SYNTBOT_DISPLAY: File {{DUMPFILE}} has been copied to {{WINFILER}}\\{{CHANGE_NB}} {{ MSG_USERS }}"
+#-------------------------------------------------------------------------------------------
+      rescue:
+      - name: Log output when FAILED
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task {{ansible_failed_task.name}} failed ({{ansible_failed_result.msg}})"
+        failed_when: True
+#-------------------------------------------------------------------------------------------
+      always:
+      - name: "umount {{LINFILER}} on {{mount_point}}"
+        mount:
+          path: "{{mount_point}}"
+          fstype: cifs
+          src: "{{LINFILER}}"
+          opts: "vers=3,credentials=/2L22.cred,iocharset=utf8"
+          state: absent
+        when: ansible_distribution_version >= '7'
+
+      - name: Delete files on {{ HOSTS }}
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - /tmp/sshpass_rh6
+          - /2L22.cred
+          - /u07/flash_recovery_area/{{ORACLE_SID}}_{{HOST_NAME}}/export/{{DUMPFILE | default ('unkown')}}
+#-------------------------------------------------------------------------------------------
