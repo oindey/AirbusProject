@@ -1,0 +1,119 @@
+---
+- name: Playbook check if host exists in inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ vmHOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{vmHOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: This target host {{ vmHOSTS }} does not exist in the Ansible Tower Inventory 2L22"
+        failed_when: True
+
+- name: Playbook VM info via VRO API
+  gather_facts: false
+  become: false
+  hosts: localhost
+  vars:
+    vm_user: '{{ lookup("env", "VMWARE_USER") }}'
+    vm_pwd: '{{ lookup("env", "VMWARE_PASSWORD") }}'
+    vmHOSTS: ''
+    VMHOST: ''
+    ACTION: ''
+    WID: 9260bbbb-be6c-4f49-af11-93ca4d8b4952
+  tasks:
+    - block:
+      - name: Get hostname short name
+        set_fact:
+          VMHOST: "{{ vmHOSTS | regex_replace('\\..*')}}"
+
+      - name: "Call VRO API {{ WID }}"
+        uri:
+          url: "https://de0-vsvro-p01.eu.airbus.corp:8281/vco/api/workflows/{{ WID|trim }}/executions/"
+          user: "{{ vm_user }}"
+          password: "{{ vm_pwd }}"
+          method: POST
+          force_basic_auth: yes
+          status_code: 202
+          body_format: json
+          body: '{"parameters":[{"value": {"string":{"value":"{{VMHOST}}"}},"name": "inVmName","type": "string","scope": "local"}]}'
+          validate_certs: no
+        register: this
+
+      - name: workflow submitted
+        debug:
+          msg: "workflow has been successfuly submitted: {{ this.location | urlsplit('path') }}"
+
+      - name: Loop checking workflow completeness
+        uri:
+          url: "{{ this.location }}state/"
+          user: "{{ vm_user }}"
+          password: "{{ vm_pwd }}"
+          method: GET
+          force_basic_auth: yes
+          status_code: 200
+          body_format: json
+          validate_certs: no
+        register: vro_status
+        until: "vro_status.json.value|default('empty') == 'completed' or vro_status.json.value|default('empty') == 'failed'"
+        retries: 12
+        delay: 15
+        failed_when: "vro_status.json.value|default('empty') != 'completed'"
+
+      - name: Get workflow log
+        uri:
+          url: "{{ this.location }}"
+          user: "{{ vm_user }}"
+          password: "{{ vm_pwd }}"
+          method: GET
+          force_basic_auth: yes
+          status_code: 200
+          body_format: json
+          validate_certs: no
+        register: vro_logs
+        ignore_errors: yes
+
+      - name: extract outVmState
+        set_fact:
+          outVmState: "{{ vro_logs.json['output-parameters'] | json_query(jmesquery) }}"
+        vars:
+          jmesquery: "[?name=='outVmState'][value]"
+
+      - name: extract outVCenter
+        set_fact:
+          outVCenter: "{{ vro_logs.json['output-parameters'] | json_query(jmesquery) }}"
+        vars:
+          jmesquery: "[?name=='outVCenter'][value]"
+
+      - name: Log output for SYNTBOT 
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: SUCCESSFUL: Get VM information has been done on {{vmHOSTS}}" 
+            - "SYNTBOT_DISPLAY: outVmState: {{ outVmState | regex_replace ('.*value.*: u', '') | regex_replace ('}}]]', '') }} outVCenter: {{ outVCenter | regex_replace ('.*value.*: u', '') | regex_replace ('}}]]', '') }}"
+
+      rescue:
+      - name: Get log if workflow failed
+        uri:
+          url: "{{ this.location }}"
+          user: "{{ vm_user }}"
+          password: "{{ vm_pwd }}"
+          method: GET
+          force_basic_auth: yes
+          status_code: 200
+          body_format: json
+          validate_certs: no
+        register: vro_logs
+        ignore_errors: yes
+        when: "vro_status.json.value|default('empty') != 'completed'"
+
+      - name: "FAILED log for Syntbot"
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: Task {{ ansible_failed_task.name}} failed: {{ vro_logs.json['output-parameters']|default('empty')}}"
+        failed_when: True
