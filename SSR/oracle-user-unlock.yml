@@ -1,0 +1,160 @@
+---
+- name: Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory 2L22"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED:  This target host {{ HOSTS }} does not exist in Tower Ansible Inventory 2L22"
+        failed_when: True
+#---------------------------------------------------------------------------------------------
+- name: Playbook Oracle Reset Password (ostd_pwd_rst)
+  gather_facts: true
+  hosts: "{{ HOSTS }}"
+  become: true
+  vars:
+   HOSTS:
+   ORACLE_SID:
+   USER:
+   code_var:
+      - "|0| OK Execution succeeded"
+      - "|1| Inputs from requester are not good"
+      - "|2| Wrong node (launched on Standby)"
+      - "|3| Error during execution (DBA action is required)"
+
+  tasks:
+    - block:
+      - name: pick up the lines we are interested in
+        set_fact:
+          important_lines: "{{ important_lines|default([]) +  [item] }}"
+        when: item.split('|')
+        with_items:
+          - "{{ code_var }}"
+
+      - name: Check if ORACLE_SID or USER is provided
+        assert:
+          that:
+            - ORACLE_SID | mandatory and  ORACLE_SID is defined and ORACLE_SID is string
+            - USER | mandatory and  USER is defined and USER is string
+          msg: "Please provide ORACLE_SID or USER to unlock user"
+
+      - name: Check if /etc/oratab exist on {{ HOSTS }}
+        stat: 
+          path: /etc/oratab
+        register: oratab
+
+      - name: Fail if /etc/oratab does not exist on {{ HOSTS }}
+        fail: 
+          msg: "/etc/oratab does not exist"
+        when: oratab.stat.exists == false
+
+      - name: Copy scripts to target host {{ HOSTS }}
+        copy:
+          src: "{{ item.src }}"
+          dest: "{{ item.dest }}"
+          mode: 0775
+          owner: oracle
+          group: dba
+        with_items:
+          - { src: 'files/ostd_user_unlock',dest: '/tmp/ostd_user_unlock'}
+
+      - name: Get HOME directory Oracle
+        become_user: oracle
+        become: true 
+        shell: |
+          .  ~oracle/.profile && echo "$HOME"
+        register: home
+        args:
+          executable: /bin/bash
+
+      - name: Check if {{home.stdout}}/tools/environ exists
+        stat:
+          path: "{{home.stdout}}/tools/environ"
+        register: env_exist
+
+      - name: Fail when {{home.stdout}}/tools/environ doesn't exist
+        fail:
+          msg:  "{{home.stdout}}/tools/environ desn't exist"
+        when: env_exist.stat.exists == false
+
+      - name: Oracle Unlock User (ostd_user_unlock -s {{ORACLE_SID}} -u {{USER}}) 
+        become_user: oracle
+        become: true
+        shell: |
+          .  ~oracle/.profile && \
+          source ~/tools/environ/oraenv{{ORACLE_SID}} && \
+          /tmp/ostd_user_unlock -s {{ORACLE_SID}} -u {{USER}}
+        register: result
+
+      - name: Log output for SYNTBOT OK for reset password
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: Unlock user {{USER}} on {{ORACLE_SID}} for {{ansible_host}}"
+           - "SYNTBOT_DISPLAY: Exit Code = 0 OK"
+           - "{{ result.stdout }}"
+        when: result.rc == 0
+
+#------------------------------------------------------------------------------------------------------------
+      rescue:
+
+      - name: Log output for SYNTBOT when failed 
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task {{ansible_failed_task.name}} on {{ansible_host}} {{ ansible_failed_result.msg }}"
+        failed_when: True
+        when: result is not defined 
+
+      - name: End Play if result is not defined
+        meta: end_play
+        when: result is not defined
+
+      - name: Get ERROR_CODE from LOG file
+        set_fact:
+          ERROR_CODE: "{{ item.split(':')[1] }}"
+        when: item|trim is search('Exit Code :')
+        with_items:
+          - "{{ result.stdout_lines }}"
+        loop_control:
+          label: "{{ item.split(' ')[0] }}"
+
+      - name: set fact
+        set_fact:
+          CODE: "{{ERROR_CODE|int}}"
+
+      - name: Find the line with the name we are looking for in 2nd colum
+        set_fact:
+          target_line: "{{ item }}"
+        when: item|trim is search(CODE) 
+        with_items:
+          - "{{ important_lines }}"
+
+      - name: get the attributes from the target lin
+        set_fact:
+          attribute: "{{ target_line.split('|')[2]|trim }}"
+
+      - name: Log output for SYNTBOT when failed on unlock user for {{USER}}
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task {{ansible_failed_task.name}} on {{ansible_host}} {{ ansible_failed_result.msg }}"
+            - "SYNTBOT_DISPLAY: Exit Code = {{ ERROR_CODE }} {{ attribute }}"
+            - "{{result.stdout}}"
+        failed_when: True
+        when: result is defined and result.rc != 0
+
+      always:
+      - name: Delete files on {{ HOSTS }}
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - /tmp/ostd_user_unlock.ko
+#-------------------------------------------------------------------------------------------
