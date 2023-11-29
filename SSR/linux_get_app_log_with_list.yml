@@ -1,0 +1,161 @@
+---
+- name: Playbook check if host exists in inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: This target host {{ HOSTS }} does not exist in the Ansible Tower Inventory 2L22"
+        failed_when: True
+
+- name: Playbook check if host is Linux
+  gather_facts: false
+  hosts: "{{ HOSTS }}"
+  vars:
+    HOSTS:
+
+  tasks:
+    - block:
+      - name: "Fail if Variable ansible_connection is winrm"
+        assert:
+          that:
+            - ansible_connection != "winrm"
+          msg: "Playbook is for linux not windows"
+
+      rescue:
+      - name: Invalid OS for this playbook
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: {{ HOSTS }} is a windows cannot run this playbook"
+        failed_when: True
+
+- name: Playbook Get application Logs
+  hosts: "{{ HOSTS }}"
+  gather_facts: true
+  become: true
+  vars:
+    HOSTS: ""
+    LOG_FILES: ""
+    mount_point: "/mnt_{{ansible_uptime_seconds}}"
+    FILERMOUNTER: "{{ 'fr0-viaas-3357.eu.airbus.corp' if ansible_distribution_version < '7' else HOSTS }}"
+    FILER: ""
+    SLASH: '/'
+    BSLASH: '\'
+    WINFILER: "{{ FILER | replace (SLASH,BSLASH)}}"
+    USER: ""
+    RITM: ""
+    ZIPFILE: "/tmp/{{inventory_hostname_short}}_logs.zip"
+    RH7USR: '{{ lookup("env", "OVIRT_USERNAME") }}'
+    RH7PWD: '{{ lookup("env", "OVIRT_PASSWORD") }}'
+    LIST_USERS: ''
+    MSG_USERS: ''
+
+  tasks:
+    - block:
+      - name: convert list to string
+      # no more multiple files
+        set_fact:
+          LOG: "{{item}}"
+        with_items:
+          - "{{ LOG_FILES }}"
+
+      - name: "checking input parameters are  not empty"
+        assert:
+          that: ( item is defined ) and ( item | length > 0 )
+          fail_msg: "At least a parameter is empty"
+        with_items:
+          - "{{FILER}}"
+          - "{{RITM}}"
+          - "{{USER}}"
+
+      - name: "checking if {{ LOG }} exist"
+        stat:
+          path: "{{ LOG }}"
+        register: result
+        failed_when: not result.stat.exists
+
+      - name: "Get directory size"
+        shell: du -sm --one-file-system "{{ result.stat.path }}" | awk '{print $1}'
+        register : dir_size
+        changed_when: false
+        when: result.stat.isdir
+
+      - name: "check directory size is less than 50M"
+        assert:
+          that: dir_size.stdout|int < 50
+          fail_msg: "{{ result.stat.path }} has a size of {{dir_size.stdout|int}}M > 50M"
+        when: result.stat.isdir
+
+      - name: "create zip with directory contents"
+        archive:
+          path: "{{ result.stat.path }}"
+          dest: "{{ ZIPFILE }}"
+          format: zip
+        when: result.stat.isdir
+
+      - name: "works on zip instead of log"
+        set_fact:
+          LOG: "{{ ZIPFILE }}"
+        when: result.stat.isdir
+
+      - name: include OS specific tasks
+        include_tasks: "tasks/linux{{ ansible_distribution_major_version }}_get_app_log_with_list.yml"
+
+      - name: remove temporary files
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - "{{ ZIPFILE }}"
+          - "/tmp/sshpass_rh6"
+
+      - name: Log output for SYNTBOT
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: SUCCESSFUL: Log {{ LOG }} has been copied from {{ HOSTS }} to {{ WINFILER }}\\{{RITM}} {{ MSG_USERS }}"
+
+      rescue:
+      - name: remove temporary files
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - "{{ ZIPFILE }}"
+          - "/tmp/sshpass_rh6"
+
+      - name: "Umount Filer {{FILER}}"
+        mount:
+          path: "{{mount_point}}"
+          fstype: cifs
+          src: "{{FILER}}"
+          state: absent
+        when: ansible_distribution_version >= '7'
+
+      - name: "Umount Filer {{FILER}} on {{FILERMOUNTER}}"
+        mount:
+          path: "{{mount_point}}"
+          fstype: cifs
+          src: "{{FILER}}"
+          state: absent
+        delegate_to: "{{ FILERMOUNTER }}"
+        vars:
+          ansible_ssh_user: '{{ RH7USR }}'
+          ansible_ssh_pass: '{{ RH7PWD }}'
+          ansible_become: yes
+          ansible_become_method: sudo
+          ansible_become_user: root
+          ansible_become_password: '{{ RH7PWD }}'
+        when: ansible_distribution_version < '7'
+
+      - name: "FAILED log for Syntbot"
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: Task {{ ansible_failed_task.name}} failed"
+        failed_when: True
