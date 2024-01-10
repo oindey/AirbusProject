@@ -1,0 +1,96 @@
+---
+- name: Playbook check if host exists in inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: This target host {{ HOSTS }} does not exist in the Ansible Tower Inventory 2L22"
+        failed_when: True
+
+- name: Playbook check if host is Windows
+  gather_facts: false
+  hosts: "{{ HOSTS }}"
+  vars:
+    HOSTS:
+
+  tasks:
+    - block:
+      - name: "Fail if Variable ansible_connection is winrm"
+        assert:
+          that:
+            - ansible_connection == "winrm"
+          msg: "Playbook is for Windows not Linux"
+
+      rescue:
+      - name: Invalid OS for this playbook
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: {{ HOSTS }} is a Linux cannot run this playbook"
+        failed_when: True
+
+- name: Playbook Windows prerequistes for ControlM agent
+  hosts: "{{ HOSTS }}"
+  gather_facts: false
+  vars:
+    HOSTS: ""
+    FILER: '\\fr0-svm09.eu.airbus.corp\YA00_ctmsoftdistrib\Control-M_Agent 9.0.00'
+    CTRLMBIN:
+      - 'DRKAI.9.0.00_windows_x86_64.zip'
+      - 'PAKAI.9.0.00.400_windows_x86_64.exe'
+    LOCALDIR: 'C:\Temp\Controlm'
+
+  tasks:
+    - block:
+      - name: "check if controlM agent is already installed"
+        win_shell: Get-Service ctmag*
+        register: ctrlm_version
+        failed_when: false
+        changed_when: false
+
+      - name: "create directory {{ LOCALDIR }}"
+        win_file:
+          path: "{{ LOCALDIR }}"
+          state: directory
+        when: not ctrlm_version.stdout
+
+      - name: "Copy install binaries and script from Filer"
+        win_copy:
+          src: "{{FILER}}\\{{ item }}"
+          remote_src: yes
+          dest: "{{ LOCALDIR }}\\"
+        with_items: 
+          - "{{ CTRLMBIN }}"
+        vars:
+          ansible_become: yes
+          ansible_become_method: runas
+          ansible_become_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_become_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become_flags: logon_type=new_credentials logon_flags=netcredentials_only
+        when: not ctrlm_version.stdout
+  
+      - name: Log output for SYNTBOT when controlM is already installed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: SUCCESSFUL: ControlM agent {{ ctrlm_version.stdout| trim | regex_search('\\bctm[a-z]*_[A-Z]*\\b') }} is already installed on {{ HOSTS }}"
+        when: ctrlm_version.stdout
+
+      - name: Log output for SYNTBOT when controlM is not installed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: SUCCESSFUL: ControlM binaries {{ CTRLMBIN | join (', ') }} have been copied to {{ HOSTS }} in {{ LOCALDIR }}"
+        when: not ctrlm_version.stdout
+
+      rescue:
+      - name: "FAILED log for Syntbot"
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: Task {{ ansible_failed_task.name}} failed"
+        failed_when: True
