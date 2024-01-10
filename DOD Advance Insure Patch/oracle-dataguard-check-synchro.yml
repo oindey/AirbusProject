@@ -1,0 +1,123 @@
+---
+- name: Playbook - Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if {{HOSTS}} does not exist in Ansible Tower's inventory 2L22"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: This target host {{HOSTS}} does not exist in Tower Ansible Inventory 2L22"
+        failed_when: True
+#---------------------------------------------------------------------------------------------
+- name: Playbook DB Healthcheck on {{HOSTS}} (INST_ABC_DB - Check dataguard)
+  gather_facts: true
+  hosts: "{{HOSTS}}"
+  become: true
+  vars:
+   HOSTS:
+
+  tasks:
+    - block:
+
+      - name: Check if /etc/oratab exist on {{HOSTS}}
+        stat: 
+          path: /etc/oratab
+        register: oratab
+
+      - name: Failed when /etc/oratab doesn't exist
+        fail:
+          msg:
+            - "FAILED: /etc/oratab does not exist on {{ansible_host}}" 
+        when: oratab.stat.exists == false
+
+      - name: Check if there is at least one instance from /etc/oratab on {{HOSTS}}
+        shell: |
+           N=`cat /etc/oratab|grep -v ^#|grep ^[A-Z]|cut -d: -f1|wc -l`
+           if [ $N -gt 0 ]; then
+             echo $N
+           else
+             exit 1
+           fi
+        register: instance
+
+      - name: Failed no ORACLE instance available in /etc/oratab 
+        fail:
+          msg:
+            - "FAILED: No ORACLE instance availbale in /etc/oratab {{ansible_host}}" 
+        when: instance.rc == 1
+
+      - name: Copy scripts to target host {{ HOSTS }}
+        copy:
+          src: "{{ item.src }}"
+          dest: "{{ item.dest }}"
+          mode: 0775
+          owner: oracle
+          group: dba
+        with_items:
+          - { src: 'files/ostd_check_synchro',dest: '/tmp/ostd_check_synchro'}
+
+      - name: Get all instances ORACLE_SID from /etc/oratab on {{HOSTS}}
+        shell: "cat /etc/oratab|grep -v ^#|grep ^[A-Z]|cut -d: -f1" 
+        register: ora_sid
+
+      - name: "Database Check Synchro Dataguard on {{HOSTS}} ({{ora_sid.stdout}})"
+        become_user: oracle
+        become: true
+        ansible.builtin.shell: ". $HOME/.profile && /tmp/ostd_check_synchro -s {{item}}"
+        loop: "{{ ora_sid.stdout_lines }}"
+        register: ostd_synchro
+        failed_when: ostd_synchro.rc != 0
+        args:
+            executable: /bin/bash
+
+      - name: Log output for SYNTBOT OK
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: Dataguard Check Synchro on {{ansible_host}} ({{ora_sid.stdout}})"
+
+      rescue:
+
+      - name: Task Set COMMENT on loop backup failed
+        set_fact:
+          COMMENT: "(Database Instance Healthcheck failed: {{item.item}})"
+        with_items: "{{ostd_synchro.results}}"
+        when: oratab.stat.exists == True and item is failed
+        ignore_errors: true
+
+      - name: Log output for SYNTBOT when failed loop
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Dataguard Check Synchro failed on {{ansible_host}} {{COMMENT}}"
+        when : COMMENT is defined and oratab.stat.exists == True
+        failed_when: True
+
+      - name: Log output for SYNTBOT when failed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Dataguard Check Synchro failed on {{ansible_host}} (no ORACLE instance in /etc/oratab)" 
+        when: COMMENT is  not defined and oratab.stat.exists == True
+        failed_when: True
+
+      - name: Log output for SYNTBOT when failed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Dataguard Check Synchro failed on {{ansible_host}} /etc/oratab doesn't exist" 
+        when: COMMENT is  not defined and oratab.stat.exists == false
+        failed_when: True
+
+      always:
+      - name: Delete files on {{ HOSTS }}
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - /tmp/ostd_check_synchro
+#-------------------------------------------------------------------------------------------
