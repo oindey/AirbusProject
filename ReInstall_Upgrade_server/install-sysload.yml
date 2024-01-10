@@ -1,0 +1,106 @@
+---
+- name: Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED:  This target host {{HOSTS}} does not  exist in tower Ansible Inventory 2L22"
+        failed_when: True
+
+# install sysload client
+- name: install sysload client
+  hosts: "{{ HOSTS }}"
+  gather_facts: false
+  vars:
+    HOSTS:
+    ADM_HOST: de0-monas-p01.eu.airbus.corp
+    SCRIPT: /local/opt/Automation/Sysload/bin/sldAddAgent.sh
+    exit_code:
+      0:
+        desc: "ok"
+      4:
+        desc: "Missing argument"
+      8:
+        desc: "Sysload agent not registered"
+      12:
+        desc: "CI not found in CMDB or not in ABC perimeter"
+      16:
+        desc: "Sysload agent not fully registered"
+  tasks:
+    - block:
+      - name: check if sysload is installed
+        win_stat:
+          path: D:\SYSLOAD\adm\collector_windows\setup.exe
+        register: file_info
+        changed_when: false
+        failed_when: false
+
+      - name: copy sysload client binaries from artifcatory to the target host 
+        win_get_url:
+          url: https://artifactory.fr.eu.airbus.corp/1Y40/R-2L22_SyntBots_generic_L/windows/2012R2/SysloadClient.zip
+          headers:
+            X-JFrog-Art-Api: AKCp5e3outMQBxeB6mg6E54ap2mnwnVSoKv4vGr7mjk1ZmazGBiY6N5gBhSyxZdsRv89rGYJ3
+          dest: C:\Temp
+          force: yes
+        when: file_info.stat.exists == False
+
+      - name: Unzips sysload client binaries
+        win_unzip:
+          src: C:\Temp\SysloadClient.zip
+          dest: C:\Temp\
+          delete_archive: yes
+        when: file_info.stat.exists == False
+        
+      - name: install sysload client
+        win_command: cmd /c "C:/Temp/SysloadClient/Sysload_Client.cmd"
+        when: file_info.stat.exists == False
+
+      - name: remove sysload client binairies
+        win_shell: rmdir /S /Q "c:/temp/SysloadClient"
+        args:
+          executable: cmd.exe
+        when: file_info.stat.exists == False
+
+      - name: Add sysload client on sysload console
+        shell: "{{ SCRIPT }} {{ansible_host}}"
+        register: result
+        failed_when: false
+        delegate_to: "{{ ADM_HOST }}"
+        vars:
+          ansible_ssh_user: '{{ lookup("env", "ANSIBLE_NET_USERNAME") }}'
+          ansible_ssh_pass: '{{ lookup("env", "ANSIBLE_NET_PASSWORD") }}'
+          ansible_become: no
+        when: file_info.stat.exists == False
+
+      - name: "assert RC=0 for {{ SCRIPT }}"
+        assert:
+          that: result.rc == 0
+          msg: "{{exit_code[result.rc|int].desc}}"
+        when: file_info.stat.exists == False
+
+      - name: Log output when successful installation
+        debug:
+          msg: "SYNTBOT_OUTPUT: SUCCESSFUL: install of sysload on {{ ansible_host }}"
+        when: file_info.stat.exists == False
+
+      - name: Log output when successful already installed
+        debug:
+          msg: "SYNTBOT_OUTPUT: SUCCESSFUL: sysload is already installed on {{ ansible_host }}"
+        when: file_info.stat.exists == True
+
+      rescue:
+      - name: Log output when failed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task {{ ansible_failed_task.name}} failed on {{ ansible_host }} : {{ ansible_failed_result.msg }}"
+        failed_when: True
