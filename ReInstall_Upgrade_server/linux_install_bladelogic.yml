@@ -1,0 +1,51 @@
+---
+- name: Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if Extra Variable {{ HOSTS }} does not exist in Ansible Tower's inventory"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: "{{HOSTS}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED:  This target host {{HOSTS}} does not  exist in tower Ansible Inventory 2L22"
+        failed_when: True
+
+# install bladelogic client
+- name: install bladelogic client
+  hosts: "{{ HOSTS }}"
+  gather_facts: false
+  become: true
+  tasks:
+    - block:
+      - name: Install the latest version of aicb-bladelogic
+        yum:
+          name: aicb-bladelogic
+          state: latest
+
+#      - name: Verify BLAdmins map
+#        lineinfile:
+#          path: /etc/rsc/users.local
+#          line: 'BLAdmins:*    rw,map=root'
+#          state: present
+
+      - name: start BladeLogic_RSCD_Agent 
+        command: /sbin/service rscd start
+
+      - name: Log output when successful
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: SUCCESSFUL install of blade logic on {{ ansible_host }}"
+
+      rescue:
+      - name: Log output when failed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task {{ ansible_failed_task.name}} failed on {{ ansible_host }}: {{ ansible_failed_result.msg }}"
+        failed_when: True
