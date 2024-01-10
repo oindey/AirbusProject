@@ -1,0 +1,189 @@
+---
+- name: Playbook - Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if {{PATCHING_NODE}} does not exist in Ansible Tower's inventory 2L22"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: 
+           - "{{PATCHING_NODE|lower}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: This target host {{item}} does not exist in Tower Ansible Inventory 2L22"
+        failed_when: True
+#---------------------------------------------------------------------------------------------
+- name: Playbook Execute on PATCHING_NODE (INST_ABC_DB- Activity POST / db-activity-post.yml)
+  gather_facts: true
+  hosts: "{{PATCHING_NODE|lower}}"
+  become: true
+  vars:
+    PATCHING_NODE:
+
+  tasks:
+    - block:
+
+      - name: "Copy scripts to target host {{PATCHING_NODE|lower}}"
+        copy:
+          src: "{{ item.src }}"
+          dest: "{{ item.dest }}"
+          mode: 0775
+          owner: oracle
+          group: dba
+          force: yes
+        with_items:
+          - { src: 'files/ostd_check_synchro',dest: '/tmp/ostd_check_synchro'}
+          - { src: 'files/ostd_run_switchover',dest: '/tmp/ostd_run_switchover'}
+          - { src: 'files/ostd_dg_status_protect',dest: '/tmp/ostd_dg_status_protect'}
+          - { src: 'files/ostd_what_role',dest: '/tmp/ostd_what_role'}
+          - { src: 'files/ostd_is_not_mounted',dest: '/tmp/ostd_is_not_mounted'}
+          - { src: 'files/ostd_mount',dest: '/tmp/ostd_mount'}
+          - { src: 'files/ostd_get_pry_stdy_server',dest: '/tmp/ostd_get_pry_stdy_server'}
+          - { src: 'files/DB-ListStandbyNotMounted.ksh',dest: '/tmp/DB-ListStandbyNotMounted.ksh'}
+          - { src: 'files/DB-ListStandby.ksh',dest: '/tmp/DB-ListStandby.ksh'}
+          - { src: 'files/DB-CheckPrimaryExists.ksh',dest: '/tmp/DB-CheckPrimaryExists.ksh'}
+          - { src: 'files/DB-Fast-Start-Failover.ksh',dest: '/tmp/DB-Fast-Start-Failover.ksh'}
+
+      - name: "Step 0.1- Create list of all databases that are not mounted on host {{PATCHING_NODE}}"
+        become_user: oracle
+        become: true
+        shell: |
+          .  ~oracle/.profile
+          /tmp/DB-ListStandbyNotMounted.ksh
+        register: ora_sid
+        ignore_errors: true
+
+      - name: "Step 0.2- Mount standby databases ({{ora_sid.stdout}}) if not mounted on {{PATCHING_NODE}}"
+        include_tasks: tasks/DB-Mount-Standby-instance.yml
+        with_items: "{{ora_sid.stdout_lines}}"
+        when: ora_sid.rc == 0
+
+      - name: "Step 0.3- Sleep 120 on {{PATCHING_NODE}}"
+        shell: sleep 120
+        when: ora_sid.rc == 0
+
+      - name: "Step 1- Check if file /tmp/{{PATCHING_NODE|lower}}_PRIMARY exist"
+        stat: 
+          path: /tmp/{{PATCHING_NODE|lower}}_PRIMARY
+        register: list_primary
+
+      - name: "Log output for SYNTBOT OK /tmp/{{PATCHING_NODE|lower}}_PRIMARY doesn't exist"
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: There is no PRIMARY databases to switchover back to PATCHING_NODE: {{PATCHING_NODE|lower}} (File /tmp/{{PATCHING_NODE|lower}}_PRIMARY doesn't exist)"
+           - "SYNTBOT_PARAM1: "
+        when: list_primary.stat.exists == false
+
+      - name: End_play /tmp/{{PATCHING_NODE|lower}}_PRIMARY
+        meta: end_play
+        when: list_primary.stat.exists == false
+
+      - name: "Get all instances from /tmp/{{PATCHING_NODE|lower}}_PRIMARY on {{PATCHING_NODE|lower}}"
+        shell: cat /tmp/{{PATCHING_NODE|lower}}_PRIMARY
+        register: ora_sid
+        when: list_primary.stat.exists == true
+
+      - name: "Step 2- Get NOT_PATCHING_NODE name for this DATAGUARD on {{PATCHING_NODE|lower}}"
+        become_user: oracle
+        become: true
+        shell: |
+          .  ~oracle/.profile
+          ORACLE_SID=`cat /tmp/{{PATCHING_NODE|lower}}_PRIMARY |head -1|awk '{ print $1}'`
+          /tmp/ostd_get_pry_stdy_server -s ${ORACLE_SID}
+        register: get_node
+        when: list_primary.stat.exists == true
+
+      - name: "Step 2.1- Get name of other node NOT_PATCHING_NODE"
+        shell: |
+          ORACLE_SID=`cat /tmp/{{PATCHING_NODE|lower}}_PRIMARY |head -1|awk '{ print $1}'`
+          if [ -f /tmp/automationServerName${ORACLE_SID}.lst ]
+          then
+            cat /tmp/automationServerName${ORACLE_SID}.lst |grep -v `hostname` |cut -d: -f2
+            exit 0
+          else
+             echo "File : /tmp/automationServerName${ORACLE_SID}.lst doesn't exist"
+             exit 1
+          fi
+        register: node2
+        when: get_node.rc == 0 and list_primary.stat.exists == true
+
+      - name: "Step 2.2- Set NOT_PATCHING_NODE to {{node2.stdout|trim}}"
+        set_fact:
+          NOT_PATCHING_NODE: "{{ node2.stdout|trim }}"
+        when: list_primary.stat.exists == true
+
+      - name: "Step 2.3- Sleep 300 on {{PATCHING_NODE|lower}}"
+        shell: sleep 300
+        when: list_primary.stat.exists == true
+
+      - name: "Step 3- Check ostd_synchro on this host {{PATCHING_NODE|lower}}"
+        include_tasks: tasks/DB-Check-Synchro-single-instance.yml
+        with_items: "{{ora_sid.stdout_lines}}"
+        #register: ostd_synchro
+        when: list_primary.stat.exists == true
+
+      - name: "Step 4- Execute DB-Fast-Start-Failover.ksh disable on {{PATCHING_NODE|lower}} ({{ora_sid.stdout}})"
+        include_tasks: tasks/DB-Fast-Start-Failover-disable.yml
+        with_items: "{{ora_sid.stdout_lines}}"
+        #register: fsf_disable
+        when: list_primary.stat.exists == true
+
+      - name: "Step 5- Sleep 60 on {{PATCHING_NODE|lower}}"
+        shell: sleep 60
+        when: list_primary.stat.exists == true
+
+      - name: "Step 6- Switchover back to {{PATCHING_NODE|lower}} ({{ora_sid.stdout_lines}})"
+        include_tasks: tasks/DB-Switchover-instance.yml
+        with_items: "{{ ora_sid.stdout_lines }}"
+        #register: switchover
+        when: list_primary.stat.exists == true
+
+      - name: "Step 7- Remove file /tmp/{{PATCHING_NODE|lower}}_PRIMARY on {{PATCHING_NODE|lower}}"
+        file:
+          path: /tmp/{{PATCHING_NODE|lower}}_PRIMARY
+          state: absent
+        when: list_primary.stat.exists == true
+
+      - name: Log output for SYNTBOT OK
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: Databases ({{ora_sid.stdout}}) switchover back to PATCHING_NODE:{{PATCHING_NODE}} succeeded / Please execute db-activity-post-mount / PATCHING_NODE: {{PATCHING_NODE}} / NOT_PATCHING_NODE: {{NOT_PATCHING_NODE|lower}}" 
+           - "SYNTBOT_PARAM1: {{NOT_PATCHING_NODE|lower}}"
+        when: list_primary.stat.exists == true
+
+      rescue:
+
+      - name: Log output for SYNTBOT when failed loop
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Execution failed on PATCHING_NODE:{{PATCHING_NODE}} ({{COMMENT}})"
+        when : COMMENT is defined
+        failed_when: True
+
+      - name: Log output for SYNTBOT when failed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task {{ansible_failed_task.name}} failed on PATCHING_NODE:{{PATCHING_NODE}} ({{ansible_failed_result.msg }})"
+        when : COMMENT is not defined
+        failed_when: True
+
+      always:
+      - name: Delete files on {{ansible_host}}
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - /tmp/ostd_check_synchro
+          - /tmp/ostd_run_switchover
+          - /tmp/ostd_dg_status_protect
+          - /tmp/ostd_what_role
+          - /tmp/ostd_get_pry_stdy_server
+          - /tmp/DB-ListStandby.ksh
+          - /tmp/DB-CheckPrimaryExists.ksh
+          - /tmp/DB-Fast-Start-Failover.ksh
+#-------------------------------------------------------------------------------------------
