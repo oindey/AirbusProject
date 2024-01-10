@@ -1,0 +1,186 @@
+---
+- name: Playbook - Check if host exists in tower inventory
+  gather_facts: false
+  hosts: localhost
+
+  tasks:
+    - block:
+      - name: "Fail if {{PATCHING_NODE}} does not exist in Ansible Tower's inventory 2L22"
+        fail:
+          msg: "{{ item }} does not exist in Ansible Tower's inventory."
+        when: "item not in groups['all']"
+        with_items: 
+           - "{{PATCHING_NODE|lower}}"
+
+      rescue:
+      - name: Failure to get host in tower inventory
+        debug:
+          msg: "SYNTBOT_OUTPUT: FAILED: This target host {{PATCHING_NODE|lower}} does not exist in Tower Ansible Inventory 2L22"
+        failed_when: True
+#---------------------------------------------------------------------------------------------
+- name: Playbook Check if all are STANDBY database on {{PATCHING_NODE}} (INST_ABC_DB - Oracle PRE / db-activity-pre.yml)
+  gather_facts: true
+  hosts: "{{PATCHING_NODE|lower}}"
+  become: true
+  vars:
+   PATCHING_NODE:
+
+  tasks:
+    - block:
+
+      - name: "Step 1- Check if /etc/oratab exist on {{PATCHING_NODE}}"
+        stat: 
+          path: /etc/oratab
+        register: oratab
+
+      - name: Check Fail if /etc/oratab does not exist 
+        fail: 
+          msg: "/etc/oratab does not exist"
+        when: oratab.stat.exists == false
+
+      - name: Check if there is at least one instance from /etc/oratab on {{ansible_host}}
+        shell: |
+          N=`cat /etc/oratab|grep -v ^#|grep ^[A-Z]|cut -d: -f1|wc -l`
+          if [ $N -gt 0 ]; then
+            echo $N
+          else
+            exit 1
+          fi
+        register: instance
+
+      - name: Failed no ORACLE instance available in /etc/oratab
+        fail:
+          msg: 
+            - "FAILED: No ORACLE instance available in /etc/oratab {{ansible_host}}"
+        when: instance.rc == 1
+
+      - name: Copy scripts to target host {{ PATCHING_NODE }}
+        copy:
+          src: "{{ item.src }}"
+          dest: "{{ item.dest }}"
+          mode: 0775
+          owner: oracle
+          group: dba
+          force: yes
+        with_items:
+          - { src: 'files/ostd_check_synchro',dest: '/tmp/ostd_check_synchro'}
+          - { src: 'files/ostd_run_switchover',dest: '/tmp/ostd_run_switchover'}
+          - { src: 'files/ostd_dg_status_protect',dest: '/tmp/ostd_dg_status_protect'}
+          - { src: 'files/ostd_dg_status_originel',dest: '/tmp/ostd_dg_status_originel'}
+          - { src: 'files/ostd_what_role',dest: '/tmp/ostd_what_role'}
+          - { src: 'files/ostd_get_pry_stdy_server',dest: '/tmp/ostd_get_pry_stdy_server'}
+          - { src: 'files/DB-CheckPrimaryExists.ksh',dest: '/tmp/DB-CheckPrimaryExists.ksh'}
+          - { src: 'files/DB-ListPrimary.ksh',dest: '/tmp/DB-ListPrimary.ksh'}
+          - { src: 'files/DB-Fast-Start-Failover.ksh',dest: '/tmp/DB-Fast-Start-Failover.ksh'}
+
+      - name: "Get all instances ORACLE_SID from /etc/oratab on {{PATCHING_NODE}}"
+        shell: "cat /etc/oratab|grep -v ^#|grep ^[A-Z]|cut -d: -f1" 
+        register: ora_sid
+
+      - name: "Step 2- Check ostd_synchro on this host {{PATCHING_NODE}}"
+        include_tasks: tasks/DB-Check-Synchro-single-instance.yml
+        with_items: "{{ora_sid.stdout_lines}}"
+
+      - name: "Step 3- Check if PRIMARY exist on this host {{PATCHING_NODE}} (0=exist)"
+        become_user: oracle
+        become: true
+        shell: |
+           .  ~oracle/.profile
+           /tmp/DB-CheckPrimaryExists.ksh
+        register: primary_exist
+        ignore_errors: true
+
+      - name: "If PRIMARY does not exists then exit successful and set NOT_PATCHING_NODE=NO_PRIMARY_EXIST"
+        set_fact:
+          NOT_PATCHING_NODE: "NO_PRIMARY_EXIST"
+        when: primary_exist.rc != 0
+
+      - name: "Step 4- Delete /tmp/{{PATCHING_NODE|lower}}_PRIMARY on {{PATCHING_NODE|lower}} if exist"
+        file:
+          path: /tmp/{{PATCHING_NODE|lower}}_PRIMARY
+          state: absent
+        when: primary_exist.rc != 0 
+
+      - name: "Step 5- Save a list of PRIMARY on host {{PATCHING_NODE|lower}} into file /tmp/{{PATCHING_NODE|lower}}_PRIMARY"
+        become_user: oracle
+        become: true
+        shell: |
+            .  ~oracle/.profile
+            /tmp/DB-ListPrimary.ksh > /tmp/{{PATCHING_NODE|lower}}_PRIMARY
+        when: primary_exist.rc == 0
+
+      - name: "Step 6- Get other node name for this DATAGUARD on {{PATCHING_NODE}}"
+        become_user: oracle
+        become: true
+        shell: |
+            .  ~oracle/.profile
+            ORACLE_SID=`cat /tmp/{{PATCHING_NODE|lower}}_PRIMARY |head -1|awk '{ print $1}'`
+            /tmp/ostd_get_pry_stdy_server -s ${ORACLE_SID} >/dev/null 2>&1
+            if [ $? = 0 ] ; then
+              grep -i `hostname` /tmp/automationServerName${ORACLE_SID}.lst >/dev/null 2>&1
+              if [ $? != 0 ]; then
+                echo "grep `hostname` in the file /tmp/automationServerName${ORACLE_SID}.lst failed"
+                exit 1
+              fi
+              cat /tmp/automationServerName${ORACLE_SID}.lst |grep -v -i `hostname` |cut -d: -f2
+            else
+              echo "Error when executing /tmp/ostd_get_pry_stdy_server -s ${ORACLE_SID}"
+              exit 1
+            fi
+        register: node2
+        when: primary_exist.rc == 0 
+        args:
+          executable: /bin/bash
+
+      - name: "Set NOT_PATCHING_NODE to {{node2.stdout|trim}}"
+        set_fact:
+          NOT_PATCHING_NODE: "{{ node2.stdout|trim }}"
+        when: primary_exist.rc == 0 
+
+      - name: Log output for SYNTBOT OK
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: ALL databases ({{ora_sid.stdout}}) are Standby on PATCHING_NODE:{{PATCHING_NODE}}"
+           - "SYNTBOT_PARAM1: "
+        when: NOT_PATCHING_NODE == "NO_PRIMARY_EXIST"
+
+      - name: Log output for SYNTBOT OK
+        debug:
+          msg:
+           - "SYNTBOT_OUTPUT: SUCCESSFUL: Primary databases ({{ora_sid.stdout}}) exists on PATCHING_NODE:{{PATCHING_NODE}} / Please execute template db-activity-pre-switchover / PATCHING_NODE: {{PATCHING_NODE}} / NOT_PATCHING_NODE: {{NOT_PATCHING_NODE|lower}}"
+           - "SYNTBOT_PARAM1: {{NOT_PATCHING_NODE|lower}}"
+        when: NOT_PATCHING_NODE != "NO_PRIMARY_EXIST"
+#-----------------------------------------------------------------------------------------------
+      rescue:
+
+      - name: Log output for SYNTBOT when failed loop
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Check Synchro database failed PATCHING_NODE:{{PATCHING_NODE}} / {{COMMENT}}"
+        when : COMMENT is defined
+        failed_when: True
+
+      - name: Log output for SYNTBOT when failed
+        debug:
+          msg:
+            - "SYNTBOT_OUTPUT: FAILED: Task {{ansible_failed_task.name}} failed on PATCHING_NODE:{{PATCHING_NODE}} ({{ansible_failed_result.msg}})"
+        when: COMMENT is  not defined
+        failed_when: True
+
+      always:
+      - name: Delete files on {{ PATCHING_NODE }}
+        file:
+          path: "{{ item }}"
+          state: absent
+        with_items:
+          - /tmp/ostd_check_synchro
+          - /tmp/ostd_run_switchover
+          - /tmp/ostd_dg_status_protect
+          - /tmp/ostd_dg_status_originel
+          - /tmp/ostd_what_role
+          - /tmp/ostd_get_pry_stdy_server
+          - /tmp/DB-CheckPrimaryExists.ksh
+          - /tmp/DB-ListPrimary.ksh
+          - /tmp/DB-ListPrimary.ksh
+          - /tmp/DB-Fast-Start-Failover.ksh
+#-------------------------------------------------------------------------------------------
